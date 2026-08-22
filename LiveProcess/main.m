@@ -78,20 +78,13 @@ int LiveProcessMain(int argc, char *argv[]) {
 
     // --- Hand the MobileGestalt sandbox extension token (issued by the LiveContainer
     // host) to EscapeOS so IT can consume it in its own process. Sandbox extensions are
-    // not reliably inherited by the spawned guest app on iOS 26, and a token is
-    // single-use, so we must NOT consume it here. Write the raw token to
-    // ~/Library/.esc_mg_token; EscapeOS reads and consumes it on launch.
+    // not inherited by the spawned guest app on iOS 26, and a token is single-use, so
+    // we must NOT consume it here. Pass it through an environment variable instead.
     {
         NSString *mgToken = appInfo[@"mgSandboxToken"];
         if (mgToken.length > 0) {
-            NSString *tokenPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/.esc_mg_token"];
-            NSError *e = nil;
-            [mgToken writeToFile:tokenPath atomically:YES encoding:NSUTF8StringEncoding error:&e];
-            if (e) {
-                NSLog(@"[LiveProcess] failed to write MobileGestalt token file: %@", e);
-            } else {
-                NSLog(@"[LiveProcess] wrote MobileGestalt sandbox token for EscapeOS (len=%lu)", (unsigned long)mgToken.length);
-            }
+            setenv("ESC_MG_TOKEN", mgToken.UTF8String, 1);
+            NSLog(@"[LiveProcess] passed MobileGestalt sandbox token to EscapeOS via ESC_MG_TOKEN (len=%lu)", (unsigned long)mgToken.length);
         } else {
             NSLog(@"[LiveProcess] no MobileGestalt sandbox token from host — sandbox_extension_issue_file likely returned NULL");
         }
