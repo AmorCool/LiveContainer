@@ -76,18 +76,25 @@ int LiveProcessMain(int argc, char *argv[]) {
         access = [bookmarkedUrls[i] startAccessingSecurityScopedResource];
     }
 
-    // --- Hand the MobileGestalt sandbox extension token (issued by the LiveContainer
-    // host) to EscapeOS so IT can consume it in its own process. Sandbox extensions are
-    // not inherited by the spawned guest app on iOS 26, and a token is single-use, so
-    // we must NOT consume it here. Pass it through an environment variable instead.
+    // --- Hand the container-management sandbox extension tokens (issued by the
+    // LiveContainer host) to EscapeOS so IT can consume them in its own process.
+    // Sandbox extensions are not inherited by the spawned guest on iOS 26 and a
+    // token is single-use, so we must NOT consume them here. Pass them through
+    // environment variables instead. Also forward the container root paths so
+    // EscapeOS can locate private (Documents) and shared (App Group) guest data.
     {
-        NSString *mgToken = appInfo[@"mgSandboxToken"];
-        if (mgToken.length > 0) {
-            setenv("ESC_MG_TOKEN", mgToken.UTF8String, 1);
-            NSLog(@"[LiveProcess] passed MobileGestalt sandbox token to EscapeOS via ESC_MG_TOKEN (len=%lu)", (unsigned long)mgToken.length);
+        NSString *ct = appInfo[@"lcContainerTokens"];
+        if (ct.length > 0) {
+            setenv("ESC_LC_CONTAINER_TOKENS", ct.UTF8String, 1);
+            NSLog(@"[LiveProcess] passed %lu container sandbox tokens to EscapeOS",
+                  (unsigned long)[ct componentsSeparatedByString:@"\n"].count);
         } else {
-            NSLog(@"[LiveProcess] no MobileGestalt sandbox token from host — sandbox_extension_issue_file likely returned NULL");
+            NSLog(@"[LiveProcess] no container sandbox tokens from host — sandbox_extension_issue_file likely returned NULL");
         }
+        NSString *home = appInfo[@"lcHomePath"];
+        if (home.length > 0) setenv("ESC_LC_HOME", home.UTF8String, 1);
+        NSString *ag = appInfo[@"lcAppGroupPath"];
+        if (ag.length > 0) setenv("ESC_LC_APPGROUP_PATH", ag.UTF8String, 1);
     }
 
     if ([appInfo[@"selected"] isEqualToString:@"builtinSideStore"]) {

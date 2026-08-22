@@ -91,17 +91,20 @@
             [bookmarks addObject:[tweaksURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0]];
         }
     }
-    // --- EscapeOS (MobileGestalt editor) sandbox-extension grant ---
-    // Standard security-scoped bookmarks cannot reach system paths (the issuer's
-    // own sandbox cannot access /var/containers/Shared/SystemGroup/...), so we
-    // issue a raw sandbox extension for the MobileGestalt cache container and
-    // hand the token to the guest. The guest consumes it in LiveProcess/main.m.
-    // Scoped strictly to EscapeOS by bundle id.
+    // --- LiveContainer container-management sandbox grants for EscapeOS ---
+    // Replaces the dead MobileGestalt system-path grant (denied by platform
+    // policy on free-signed LC). We instead issue sandbox extensions for the two
+    // container roots EscapeOS's container manager must scan:
+    //   1. LC's own Documents dir  -> private guest containers + .app bundles
+    //   2. LC's real App Group      -> shared ("converted") guest containers
+    // Both are paths the host legitimately owns / holds entitlement for, so the
+    // kernel grants them (unlike the protected system path). Tokens are handed
+    // to the guest via userInfo -> LiveProcess -> environment variables.
     {
         BOOL isEscapeOS = [_bundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
                        || [_bundleId localizedCaseInsensitiveContainsString:@"escapeos"];
         // Always log so we can diagnose whether the host even reaches this code.
-        NSLog(@"[LC] MG grant check: bundleId=%@ isEscapeOS=%d", _bundleId, (int)isEscapeOS);
+        NSLog(@"[LC] container grant check: bundleId=%@ isEscapeOS=%d", _bundleId, (int)isEscapeOS);
         if (isEscapeOS) {
             static char *(*issue_file)(const char *, const char *, uint32_t) = NULL;
             static dispatch_once_t once;
@@ -112,21 +115,31 @@
                 if (!issue_file) NSLog(@"[LC] sandbox_extension_issue_file symbol not found");
             });
             if (issue_file) {
-                // Nyxian-style: issue for the exact MobileGestalt plist file, not just the container.
-                NSString *mgPath = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
-                char *token = issue_file("com.apple.app-sandbox.read-write", [mgPath UTF8String], 0);
-                if (!token) {
-                    // Fallback: try read-only class on the same file path.
-                    token = issue_file("com.apple.app-sandbox.read", [mgPath UTF8String], 0);
-                    NSLog(@"[LC] read-write token denied; read-only fallback token=%p", (void*)token);
+                NSString *lcHome = NSHomeDirectory();                              // LC data container
+                NSString *docRoot = [lcHome stringByAppendingPathComponent:@"Documents"];
+                NSString *agRoot  = [LCSharedUtils appGroupPath].path;             // real App Group container
+                NSMutableArray<NSString *> *roots = [NSMutableArray array];
+                if (docRoot) [roots addObject:docRoot];
+                if (agRoot)  [roots addObject:agRoot];
+                NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+                for (NSString *root in roots) {
+                    char *tok = issue_file("com.apple.app-sandbox.read-write", root.UTF8String, 0);
+                    const char *cls = "read-write";
+                    if (!tok) { tok = issue_file("com.apple.app-sandbox.read", root.UTF8String, 0); cls = "read"; }
+                    if (tok) {
+                        [tokens addObject:[NSString stringWithUTF8String:tok]];
+                        free(tok);
+                        NSLog(@"[LC] issued container sandbox extension (%s) for %@", cls, root);
+                    } else {
+                        NSLog(@"[LC] sandbox_extension_issue_file returned NULL for %@", root);
+                    }
                 }
-                if (token) {
-                    [userInfo setValue:[NSString stringWithUTF8String:token] forKey:@"mgSandboxToken"];
-                    free(token);
-                    NSLog(@"[LC] issued MobileGestalt sandbox extension for EscapeOS (bundle %@)", _bundleId);
-                } else {
-                    NSLog(@"[LC] sandbox_extension_issue_file returned NULL for MobileGestalt path (denied by platform policy)");
+                if (tokens.count) {
+                    [userInfo setValue:[tokens componentsJoinedByString:@"\n"] forKey:@"lcContainerTokens"];
+                    NSLog(@"[LC] handed %lu container tokens to guest", (unsigned long)tokens.count);
                 }
+                if (lcHome) [userInfo setValue:lcHome forKey:@"lcHomePath"];
+                if (agRoot) [userInfo setValue:agRoot  forKey:@"lcAppGroupPath"];
             }
         }
     }
