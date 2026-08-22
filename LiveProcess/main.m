@@ -76,29 +76,24 @@ int LiveProcessMain(int argc, char *argv[]) {
         access = [bookmarkedUrls[i] startAccessingSecurityScopedResource];
     }
 
-    // --- Consume MobileGestalt sandbox extension issued by LiveContainer host (EscapeOS) ---
-    // The host grants a raw sandbox extension for the MobileGestalt cache container so this
-    // guest can read/write com.apple.MobileGestalt.plist. Activate it in this process.
+    // --- Hand the MobileGestalt sandbox extension token (issued by the LiveContainer
+    // host) to EscapeOS so IT can consume it in its own process. Sandbox extensions are
+    // not reliably inherited by the spawned guest app on iOS 26, and a token is
+    // single-use, so we must NOT consume it here. Write the raw token to
+    // ~/Library/.esc_mg_token; EscapeOS reads and consumes it on launch.
     {
         NSString *mgToken = appInfo[@"mgSandboxToken"];
         if (mgToken.length > 0) {
-            static int64_t (*consume)(const char *) = NULL;
-            static dispatch_once_t once;
-            dispatch_once(&once, ^{
-                void *h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY);
-                if (!h) h = dlopen("libsystem_sandbox.dylib", RTLD_LAZY);
-                if (h) consume = dlsym(h, "sandbox_extension_consume");
-            });
-            if (consume) {
-                int64_t handle = consume(mgToken.fileSystemRepresentation);
-                if (handle >= 0) {
-                    NSLog(@"[LiveProcess] consumed MobileGestalt sandbox extension, handle=%lld", (long long)handle);
-                } else {
-                    NSLog(@"[LiveProcess] sandbox_extension_consume failed for MobileGestalt token (handle=%lld)", (long long)handle);
-                }
+            NSString *tokenPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Library/.esc_mg_token"];
+            NSError *e = nil;
+            [mgToken writeToFile:tokenPath atomically:YES encoding:NSUTF8StringEncoding error:&e];
+            if (e) {
+                NSLog(@"[LiveProcess] failed to write MobileGestalt token file: %@", e);
             } else {
-                NSLog(@"[LiveProcess] sandbox_extension_consume symbol not found");
+                NSLog(@"[LiveProcess] wrote MobileGestalt sandbox token for EscapeOS (len=%lu)", (unsigned long)mgToken.length);
             }
+        } else {
+            NSLog(@"[LiveProcess] no MobileGestalt sandbox token from host — sandbox_extension_issue_file likely returned NULL");
         }
     }
 
