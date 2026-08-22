@@ -98,6 +98,8 @@ int LiveProcessMain(int argc, char *argv[]) {
         // Host's grant decision, forwarded so EscapeOS can show it on-screen.
         NSString *gs = appInfo[@"lcGrantStatus"];
         if (gs.length > 0) setenv("ESC_LC_GRANT_STATUS", gs.UTF8String, 1);
+        NSString *lm = appInfo[@"lcLaunchMode"];
+        if (lm.length > 0) setenv("ESC_LC_LAUNCH_MODE", lm.UTF8String, 1);
     }
 
     if ([appInfo[@"selected"] isEqualToString:@"builtinSideStore"]) {

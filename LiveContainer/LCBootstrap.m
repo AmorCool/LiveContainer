@@ -400,6 +400,7 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         if (grant[@"lcHomePath"])        setenv("ESC_LC_HOME",         [grant[@"lcHomePath"] UTF8String], 1);
         if (grant[@"lcAppGroupPath"])    setenv("ESC_LC_APPGROUP_PATH",[grant[@"lcAppGroupPath"] UTF8String], 1);
         if (grant[@"lcGrantStatus"])     setenv("ESC_LC_GRANT_STATUS", [grant[@"lcGrantStatus"] UTF8String], 1);
+        setenv("ESC_LC_LAUNCH_MODE", "classic", 1);
     }
 
     // Overwrite home and tmp path

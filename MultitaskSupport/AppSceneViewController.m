@@ -108,6 +108,9 @@
         [grant enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
             [userInfo setValue:obj forKey:key];
         }];
+        // Distinguish multitask (appex) from classic (same-process) launch in
+        // EscapeOS's on-screen diagnostics.
+        [userInfo setValue:@"appex" forKey:@"lcLaunchMode"];
     }
 
     item.userInfo = userInfo;
