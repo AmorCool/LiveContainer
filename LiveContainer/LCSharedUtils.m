@@ -4,6 +4,8 @@
 #import "utils.h"
 @import MachO;
 
+#include <dlfcn.h>
+
 extern NSUserDefaults *lcUserDefaults;
 extern NSString *lcAppUrlScheme;
 extern NSBundle *lcMainBundle;
