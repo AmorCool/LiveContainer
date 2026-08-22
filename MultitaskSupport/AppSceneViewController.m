@@ -100,6 +100,8 @@
     {
         BOOL isEscapeOS = [_bundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
                        || [_bundleId localizedCaseInsensitiveContainsString:@"escapeos"];
+        // Always log so we can diagnose whether the host even reaches this code.
+        NSLog(@"[LC] MG grant check: bundleId=%@ isEscapeOS=%d", _bundleId, (int)isEscapeOS);
         if (isEscapeOS) {
             static char *(*issue_file)(const char *, const char *, uint32_t) = NULL;
             static dispatch_once_t once;
@@ -107,10 +109,17 @@
                 void *h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY);
                 if (!h) h = dlopen("libsystem_sandbox.dylib", RTLD_LAZY);
                 if (h) issue_file = dlsym(h, "sandbox_extension_issue_file");
+                if (!issue_file) NSLog(@"[LC] sandbox_extension_issue_file symbol not found");
             });
             if (issue_file) {
-                NSString *mgContainer = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache";
-                char *token = issue_file("com.apple.app-sandbox.read-write", [mgContainer UTF8String], 0);
+                // Nyxian-style: issue for the exact MobileGestalt plist file, not just the container.
+                NSString *mgPath = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache/Library/Caches/com.apple.MobileGestalt.plist";
+                char *token = issue_file("com.apple.app-sandbox.read-write", [mgPath UTF8String], 0);
+                if (!token) {
+                    // Fallback: try read-only class on the same file path.
+                    token = issue_file("com.apple.app-sandbox.read", [mgPath UTF8String], 0);
+                    NSLog(@"[LC] read-write token denied; read-only fallback token=%p", (void*)token);
+                }
                 if (token) {
                     [userInfo setValue:[NSString stringWithUTF8String:token] forKey:@"mgSandboxToken"];
                     free(token);
@@ -118,8 +127,6 @@
                 } else {
                     NSLog(@"[LC] sandbox_extension_issue_file returned NULL for MobileGestalt path (denied by platform policy)");
                 }
-            } else {
-                NSLog(@"[LC] sandbox_extension_issue_file symbol not found");
             }
         }
     }
