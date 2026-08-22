@@ -437,11 +437,19 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 
 + (NSDictionary *)issueContainerSandboxExtensionsForGuestBundleId:(NSString *)bundleId {
     NSMutableDictionary *result = [NSMutableDictionary dictionary];
-    NSString *baseBundleId = [bundleId stringByDeletingPathExtension];
+    // `_bundleId` from LiveContainer is the relative bundle path (e.g. "EscapeSpace.app"
+    // or "com.apple.mobile.MobileHouseArrest.app"). In classic launch mode the
+    // bundle id is passed without the .app suffix ("com.apple.mobile.MobileHouseArrest").
+    // We must NOT use -stringByDeletingPathExtension here: for the bare id it would
+    // strip "MobileHouseArrest" and leave "com.apple.mobile", causing the match to fail.
+    NSString *baseBundleId = bundleId;
+    if ([baseBundleId length] > 4 && [[baseBundleId lowercaseString] hasSuffix:@".app"]) {
+        baseBundleId = [baseBundleId substringToIndex:[baseBundleId length] - 4];
+    }
     BOOL isEscapeOS = [baseBundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
-                   || [baseBundleId localizedCaseInsensitiveContainsString:@"escapeos"]
-                   || [bundleId localizedCaseInsensitiveContainsString:@"EscapeSpace"];
-    NSLog(@"[LC] container grant check: bundleId=%@ isEscapeOS=%d", bundleId, (int)isEscapeOS);
+                   || [baseBundleId localizedCaseInsensitiveContainsString:@"escape"]
+                   || [baseBundleId localizedCaseInsensitiveContainsString:@"EscapeSpace"];
+    NSLog(@"[LC] container grant check: bundleId=%@ baseBundleId=%@ isEscapeOS=%d", bundleId, baseBundleId, (int)isEscapeOS);
     if (!isEscapeOS) {
         [result setValue:[NSString stringWithFormat:@"skipped:not_target,bundleId=%@", bundleId] forKey:@"lcGrantStatus"];
         return result;
