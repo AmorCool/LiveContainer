@@ -13,6 +13,7 @@
 #import "LCSharedUtils.h"
 #import "utils.h"
 #import "UIKitPrivate+MultitaskSupport.h"
+#import <dlfcn.h>
 
 @interface AppSceneViewController()
 @property int resizeDebounceToken;
@@ -90,6 +91,39 @@
             [bookmarks addObject:[tweaksURL bookmarkDataWithOptions:(1<<11) includingResourceValuesForKeys:0 relativeToURL:0 error:0]];
         }
     }
+    // --- EscapeOS (MobileGestalt editor) sandbox-extension grant ---
+    // Standard security-scoped bookmarks cannot reach system paths (the issuer's
+    // own sandbox cannot access /var/containers/Shared/SystemGroup/...), so we
+    // issue a raw sandbox extension for the MobileGestalt cache container and
+    // hand the token to the guest. The guest consumes it in LiveProcess/main.m.
+    // Scoped strictly to EscapeOS by bundle id.
+    {
+        BOOL isEscapeOS = [_bundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
+                       || [_bundleId localizedCaseInsensitiveContainsString:@"escapeos"];
+        if (isEscapeOS) {
+            static char *(*issue_file)(const char *, const char *, uint32_t) = NULL;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                void *h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY);
+                if (!h) h = dlopen("libsystem_sandbox.dylib", RTLD_LAZY);
+                if (h) issue_file = dlsym(h, "sandbox_extension_issue_file");
+            });
+            if (issue_file) {
+                NSString *mgContainer = @"/var/containers/Shared/SystemGroup/systemgroup.com.apple.mobilegestaltcache";
+                char *token = issue_file("com.apple.app-sandbox.read-write", [mgContainer UTF8String], 0);
+                if (token) {
+                    [userInfo setValue:[NSString stringWithUTF8String:token] forKey:@"mgSandboxToken"];
+                    free(token);
+                    NSLog(@"[LC] issued MobileGestalt sandbox extension for EscapeOS (bundle %@)", _bundleId);
+                } else {
+                    NSLog(@"[LC] sandbox_extension_issue_file returned NULL for MobileGestalt path (denied by platform policy)");
+                }
+            } else {
+                NSLog(@"[LC] sandbox_extension_issue_file symbol not found");
+            }
+        }
+    }
+
     item.userInfo = userInfo;
     
     __weak typeof(self) weakSelf = self;

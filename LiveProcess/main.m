@@ -75,7 +75,33 @@ int LiveProcessMain(int argc, char *argv[]) {
         bookmarkedUrls[i] = [NSURL URLByResolvingBookmarkData:bookmarks[i] options:0 relativeToURL:nil bookmarkDataIsStale:&isStale error:&error];
         access = [bookmarkedUrls[i] startAccessingSecurityScopedResource];
     }
-    
+
+    // --- Consume MobileGestalt sandbox extension issued by LiveContainer host (EscapeOS) ---
+    // The host grants a raw sandbox extension for the MobileGestalt cache container so this
+    // guest can read/write com.apple.MobileGestalt.plist. Activate it in this process.
+    {
+        NSString *mgToken = appInfo[@"mgSandboxToken"];
+        if (mgToken.length > 0) {
+            static int64_t (*consume)(const char *) = NULL;
+            static dispatch_once_t once;
+            dispatch_once(&once, ^{
+                void *h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY);
+                if (!h) h = dlopen("libsystem_sandbox.dylib", RTLD_LAZY);
+                if (h) consume = dlsym(h, "sandbox_extension_consume");
+            });
+            if (consume) {
+                int64_t handle = consume(mgToken.fileSystemRepresentation);
+                if (handle >= 0) {
+                    NSLog(@"[LiveProcess] consumed MobileGestalt sandbox extension, handle=%lld", (long long)handle);
+                } else {
+                    NSLog(@"[LiveProcess] sandbox_extension_consume failed for MobileGestalt token (handle=%lld)", (long long)handle);
+                }
+            } else {
+                NSLog(@"[LiveProcess] sandbox_extension_consume symbol not found");
+            }
+        }
+    }
+
     if ([appInfo[@"selected"] isEqualToString:@"builtinSideStore"]) {
         if(access && bookmarkedUrls.count > 0) {
             [lcUserDefaults setObject:bookmarkedUrls.firstObject.path forKey:@"specifiedSideStoreContainerPath"];
