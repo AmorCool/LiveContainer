@@ -101,6 +101,9 @@
     // kernel grants them (unlike the protected system path). Tokens are handed
     // to the guest via userInfo -> LiveProcess -> environment variables.
     {
+        // Forwarded to the guest via userInfo -> LiveProcess env so EscapeOS can
+        // surface the host's grant decision on-screen (no syslog needed).
+        NSString *grantStatus = @"skipped:not_target";
         BOOL isEscapeOS = [_bundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
                        || [_bundleId localizedCaseInsensitiveContainsString:@"escapeos"];
         // Always log so we can diagnose whether the host even reaches this code.
@@ -137,11 +140,19 @@
                 if (tokens.count) {
                     [userInfo setValue:[tokens componentsJoinedByString:@"\n"] forKey:@"lcContainerTokens"];
                     NSLog(@"[LC] handed %lu container tokens to guest", (unsigned long)tokens.count);
+                    grantStatus = [NSString stringWithFormat:@"issued:%lu", (unsigned long)tokens.count];
+                } else {
+                    grantStatus = @"failed:issue_null";
+                    NSLog(@"[LC] no container tokens issued (issue_file returned NULL for all roots)");
                 }
+                if (!agRoot) grantStatus = [grantStatus stringByAppendingString:@",no_appgroup"];
                 if (lcHome) [userInfo setValue:lcHome forKey:@"lcHomePath"];
                 if (agRoot) [userInfo setValue:agRoot  forKey:@"lcAppGroupPath"];
+            } else {
+                grantStatus = @"skipped:no_symbol";
             }
         }
+        [userInfo setValue:grantStatus forKey:@"lcGrantStatus"];
     }
 
     item.userInfo = userInfo;

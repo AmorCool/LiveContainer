@@ -95,6 +95,9 @@ int LiveProcessMain(int argc, char *argv[]) {
         if (home.length > 0) setenv("ESC_LC_HOME", home.UTF8String, 1);
         NSString *ag = appInfo[@"lcAppGroupPath"];
         if (ag.length > 0) setenv("ESC_LC_APPGROUP_PATH", ag.UTF8String, 1);
+        // Host's grant decision, forwarded so EscapeOS can show it on-screen.
+        NSString *gs = appInfo[@"lcGrantStatus"];
+        if (gs.length > 0) setenv("ESC_LC_GRANT_STATUS", gs.UTF8String, 1);
     }
 
     if ([appInfo[@"selected"] isEqualToString:@"builtinSideStore"]) {
