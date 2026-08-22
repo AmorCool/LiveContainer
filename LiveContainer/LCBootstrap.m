@@ -387,7 +387,19 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
         lcGuestAppId = guestAppInfo[@"LCOrignalBundleIdentifier"];
     } else {
         lcGuestAppId = appBundle.bundleIdentifier;
-        
+
+    }
+
+    // Issue container sandbox extensions for EscapeOS when launching in
+    // classic mode (same process as LC). In multitask mode this is done in
+    // AppSceneViewController; here we set the same env vars so EscapeOS's
+    // bootstrapLiveContainerExtensions() can consume them.
+    if (!isLiveProcess) {
+        NSDictionary *grant = [LCSharedUtils issueContainerSandboxExtensionsForGuestBundleId:lcGuestAppId];
+        if (grant[@"lcContainerTokens"]) setenv("ESC_LC_CONTAINER_TOKENS", [grant[@"lcContainerTokens"] UTF8String], 1);
+        if (grant[@"lcHomePath"])        setenv("ESC_LC_HOME",         [grant[@"lcHomePath"] UTF8String], 1);
+        if (grant[@"lcAppGroupPath"])    setenv("ESC_LC_APPGROUP_PATH",[grant[@"lcAppGroupPath"] UTF8String], 1);
+        if (grant[@"lcGrantStatus"])     setenv("ESC_LC_GRANT_STATUS", [grant[@"lcGrantStatus"] UTF8String], 1);
     }
 
     // Overwrite home and tmp path

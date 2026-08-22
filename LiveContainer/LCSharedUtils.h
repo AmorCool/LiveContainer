@@ -17,4 +17,13 @@
 + (NSString*)findDefaultContainerWithBundleId:(NSString*)bundleId;
 + (NSArray<NSString*>*)lcUnorderedUrlSchemes;
 + (NSArray<NSString*>*)lcUrlSchemes;
+
+/// Issue read-write (with read fallback) sandbox extensions for the two
+/// LiveContainer container roots EscapeOS needs to scan:
+///   1. <LC data container>/Documents
+///   2. <LC App Group container>
+/// Returns a dictionary with keys lcContainerTokens, lcHomePath,
+/// lcAppGroupPath, lcGrantStatus. Only issues tokens when bundleId identifies
+/// an EscapeOS guest; otherwise returns an empty dictionary.
++ (NSDictionary *)issueContainerSandboxExtensionsForGuestBundleId:(NSString *)bundleId;
 @end

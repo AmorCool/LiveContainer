@@ -432,4 +432,66 @@ NSString* FBSOpenApplicationOptionKeyPayloadURL = @"__PayloadURL";
 
     return result;
 }
+
++ (NSDictionary *)issueContainerSandboxExtensionsForGuestBundleId:(NSString *)bundleId {
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    NSString *baseBundleId = [bundleId stringByDeletingPathExtension];
+    BOOL isEscapeOS = [baseBundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
+                   || [baseBundleId localizedCaseInsensitiveContainsString:@"escapeos"]
+                   || [bundleId localizedCaseInsensitiveContainsString:@"EscapeSpace"];
+    NSLog(@"[LC] container grant check: bundleId=%@ isEscapeOS=%d", bundleId, (int)isEscapeOS);
+    if (!isEscapeOS) {
+        [result setValue:[NSString stringWithFormat:@"skipped:not_target,bundleId=%@", bundleId] forKey:@"lcGrantStatus"];
+        return result;
+    }
+
+    static char *(*issue_file)(const char *, const char *, uint32_t) = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY);
+        if (!h) h = dlopen("libsystem_sandbox.dylib", RTLD_LAZY);
+        if (h) issue_file = dlsym(h, "sandbox_extension_issue_file");
+        if (!issue_file) NSLog(@"[LC] sandbox_extension_issue_file symbol not found");
+    });
+
+    if (!issue_file) {
+        [result setValue:@"skipped:no_symbol" forKey:@"lcGrantStatus"];
+        return result;
+    }
+
+    NSString *lcHome = NSHomeDirectory();
+    NSString *docRoot = [lcHome stringByAppendingPathComponent:@"Documents"];
+    NSString *agRoot = [self appGroupPath].path;
+    NSMutableArray<NSString *> *roots = [NSMutableArray array];
+    if (docRoot) [roots addObject:docRoot];
+    if (agRoot)  [roots addObject:agRoot];
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    for (NSString *root in roots) {
+        char *tok = issue_file("com.apple.app-sandbox.read-write", root.UTF8String, 0);
+        const char *cls = "read-write";
+        if (!tok) { tok = issue_file("com.apple.app-sandbox.read", root.UTF8String, 0); cls = "read"; }
+        if (tok) {
+            [tokens addObject:[NSString stringWithUTF8String:tok]];
+            free(tok);
+            NSLog(@"[LC] issued container sandbox extension (%s) for %@", cls, root);
+        } else {
+            NSLog(@"[LC] sandbox_extension_issue_file returned NULL for %@", root);
+        }
+    }
+
+    NSString *grantStatus;
+    if (tokens.count) {
+        [result setValue:[tokens componentsJoinedByString:@"\n"] forKey:@"lcContainerTokens"];
+        NSLog(@"[LC] handed %lu container tokens to guest", (unsigned long)tokens.count);
+        grantStatus = [NSString stringWithFormat:@"issued:%lu", (unsigned long)tokens.count];
+    } else {
+        grantStatus = @"failed:issue_null";
+        NSLog(@"[LC] no container tokens issued (issue_file returned NULL for all roots)");
+    }
+    if (!agRoot) grantStatus = [grantStatus stringByAppendingString:@",no_appgroup"];
+    [result setValue:grantStatus forKey:@"lcGrantStatus"];
+    if (lcHome) [result setValue:lcHome forKey:@"lcHomePath"];
+    if (agRoot) [result setValue:agRoot  forKey:@"lcAppGroupPath"];
+    return result;
+}
 @end

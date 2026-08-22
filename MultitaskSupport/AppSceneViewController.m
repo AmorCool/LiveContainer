@@ -101,62 +101,13 @@
     // kernel grants them (unlike the protected system path). Tokens are handed
     // to the guest via userInfo -> LiveProcess -> environment variables.
     {
-        // Forwarded to the guest via userInfo -> LiveProcess env so EscapeOS can
-        // surface the host's grant decision on-screen (no syslog needed).
-        NSString *grantStatus = [NSString stringWithFormat:@"skipped:not_target,bundleId=%@", _bundleId];
-        // LC passes relativeBundlePath (e.g. "com.apple.mobile.MobileHouseArrest.app") as _bundleId,
-        // not the real CFBundleIdentifier. Strip the .app suffix before comparing.
-        NSString *baseBundleId = [_bundleId stringByDeletingPathExtension];
-        BOOL isEscapeOS = [baseBundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
-                       || [baseBundleId localizedCaseInsensitiveContainsString:@"escapeos"]
-                       || [_bundleId localizedCaseInsensitiveContainsString:@"EscapeSpace"];
-        // Always log so we can diagnose whether the host even reaches this code.
-        NSLog(@"[LC] container grant check: bundleId=%@ isEscapeOS=%d", _bundleId, (int)isEscapeOS);
-        if (isEscapeOS) {
-            static char *(*issue_file)(const char *, const char *, uint32_t) = NULL;
-            static dispatch_once_t once;
-            dispatch_once(&once, ^{
-                void *h = dlopen("/usr/lib/system/libsystem_sandbox.dylib", RTLD_LAZY);
-                if (!h) h = dlopen("libsystem_sandbox.dylib", RTLD_LAZY);
-                if (h) issue_file = dlsym(h, "sandbox_extension_issue_file");
-                if (!issue_file) NSLog(@"[LC] sandbox_extension_issue_file symbol not found");
-            });
-            if (issue_file) {
-                NSString *lcHome = NSHomeDirectory();                              // LC data container
-                NSString *docRoot = [lcHome stringByAppendingPathComponent:@"Documents"];
-                NSString *agRoot  = [LCSharedUtils appGroupPath].path;             // real App Group container
-                NSMutableArray<NSString *> *roots = [NSMutableArray array];
-                if (docRoot) [roots addObject:docRoot];
-                if (agRoot)  [roots addObject:agRoot];
-                NSMutableArray<NSString *> *tokens = [NSMutableArray array];
-                for (NSString *root in roots) {
-                    char *tok = issue_file("com.apple.app-sandbox.read-write", root.UTF8String, 0);
-                    const char *cls = "read-write";
-                    if (!tok) { tok = issue_file("com.apple.app-sandbox.read", root.UTF8String, 0); cls = "read"; }
-                    if (tok) {
-                        [tokens addObject:[NSString stringWithUTF8String:tok]];
-                        free(tok);
-                        NSLog(@"[LC] issued container sandbox extension (%s) for %@", cls, root);
-                    } else {
-                        NSLog(@"[LC] sandbox_extension_issue_file returned NULL for %@", root);
-                    }
-                }
-                if (tokens.count) {
-                    [userInfo setValue:[tokens componentsJoinedByString:@"\n"] forKey:@"lcContainerTokens"];
-                    NSLog(@"[LC] handed %lu container tokens to guest", (unsigned long)tokens.count);
-                    grantStatus = [NSString stringWithFormat:@"issued:%lu", (unsigned long)tokens.count];
-                } else {
-                    grantStatus = @"failed:issue_null";
-                    NSLog(@"[LC] no container tokens issued (issue_file returned NULL for all roots)");
-                }
-                if (!agRoot) grantStatus = [grantStatus stringByAppendingString:@",no_appgroup"];
-                if (lcHome) [userInfo setValue:lcHome forKey:@"lcHomePath"];
-                if (agRoot) [userInfo setValue:agRoot  forKey:@"lcAppGroupPath"];
-            } else {
-                grantStatus = @"skipped:no_symbol";
-            }
-        }
-        [userInfo setValue:grantStatus forKey:@"lcGrantStatus"];
+        // Issue container sandbox extensions for EscapeOS and forward the
+        // grant outcome via userInfo -> LiveProcess env so EscapeOS can surface
+        // it on-screen without needing syslog access.
+        NSDictionary *grant = [LCSharedUtils issueContainerSandboxExtensionsForGuestBundleId:_bundleId];
+        [grant enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+            [userInfo setValue:obj forKey:key];
+        }];
     }
 
     item.userInfo = userInfo;
