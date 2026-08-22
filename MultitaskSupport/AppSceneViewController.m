@@ -104,10 +104,11 @@
         // Forwarded to the guest via userInfo -> LiveProcess env so EscapeOS can
         // surface the host's grant decision on-screen (no syslog needed).
         NSString *grantStatus = [NSString stringWithFormat:@"skipped:not_target,bundleId=%@", _bundleId];
-        // LC passes relativeBundlePath (e.g. "EscapeSpace.app") as _bundleId, not the real
-        // CFBundleIdentifier, so we must also match the guest's .app folder name.
-        BOOL isEscapeOS = [_bundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
-                       || [_bundleId localizedCaseInsensitiveContainsString:@"escapeos"]
+        // LC passes relativeBundlePath (e.g. "com.apple.mobile.MobileHouseArrest.app") as _bundleId,
+        // not the real CFBundleIdentifier. Strip the .app suffix before comparing.
+        NSString *baseBundleId = [_bundleId stringByDeletingPathExtension];
+        BOOL isEscapeOS = [baseBundleId isEqualToString:@"com.apple.mobile.MobileHouseArrest"]
+                       || [baseBundleId localizedCaseInsensitiveContainsString:@"escapeos"]
                        || [_bundleId localizedCaseInsensitiveContainsString:@"EscapeSpace"];
         // Always log so we can diagnose whether the host even reaches this code.
         NSLog(@"[LC] container grant check: bundleId=%@ isEscapeOS=%d", _bundleId, (int)isEscapeOS);
