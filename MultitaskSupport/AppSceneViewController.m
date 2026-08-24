@@ -103,11 +103,21 @@
     {
         // Issue container sandbox extensions for EscapeOS and forward the
         // grant outcome via userInfo -> LiveProcess env so EscapeOS can surface
-        // it on-screen without needing syslog access.
-        NSDictionary *grant = [LCSharedUtils issueContainerSandboxExtensionsForGuestBundleId:_bundleId];
-        [grant enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
-            [userInfo setValue:obj forKey:key];
-        }];
+        // it on-screen without needing syslog access. Gated by the
+        // "Guest Container Extension" setting.
+        NSUserDefaults *containerExtDefaults = NSUserDefaults.lcSharedDefaults;
+        BOOL containerExtEnabled = YES;
+        if (containerExtDefaults && [containerExtDefaults objectForKey:@"LCContainerExtensionEnabled"] != nil) {
+            containerExtEnabled = [containerExtDefaults boolForKey:@"LCContainerExtensionEnabled"];
+        }
+        if (containerExtEnabled) {
+            NSDictionary *grant = [LCSharedUtils issueContainerSandboxExtensionsForGuestBundleId:_bundleId];
+            [grant enumerateKeysAndObjectsUsingBlock:^(id key, id obj, BOOL *stop) {
+                [userInfo setValue:obj forKey:key];
+            }];
+        } else {
+            [userInfo setValue:@"skipped:disabled" forKey:@"lcGrantStatus"];
+        }
         // Distinguish multitask (appex) from classic (same-process) launch in
         // EscapeOS's on-screen diagnostics.
         [userInfo setValue:@"appex" forKey:@"lcLaunchMode"];

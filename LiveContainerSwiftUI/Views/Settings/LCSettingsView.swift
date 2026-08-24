@@ -69,6 +69,7 @@ struct LCSettingsView: View {
     @AppStorage("LCWaitForDebugger") var waitForDebugger = false
     @AppStorage("LCSharePrivateDataWithLiveProcess") var sharePrivateDataWithLiveProcess = false
     @AppStorage("BKNoWatchdogs") var disableLiveProcessWatchdog = false
+    @AppStorage("LCContainerExtensionEnabled", store: LCUtils.appGroupUserDefault) var containerExtensionEnabled = true
     
     @EnvironmentObject private var sharedModel : SharedModel
     
@@ -232,7 +233,15 @@ struct LCSettingsView: View {
                 } footer: {
                     Text("lc.settings.silentOpenWebPageDesc".loc)
                 }
-                
+
+                Section {
+                    Toggle(isOn: $containerExtensionEnabled) {
+                        Text("lc.settings.containerExtension".loc)
+                    }
+                } footer: {
+                    Text("lc.settings.containerExtensionDesc".loc)
+                }
+
                 if sharedModel.isHiddenAppUnlocked {
                     Section {
                         Toggle(isOn: $strictHiding) {
