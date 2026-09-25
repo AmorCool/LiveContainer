@@ -93,6 +93,76 @@ static id SSSceneObserver;
     return lcAppBundle;
 }
 
+// ESC-BEGIN: make the guest bundle visible to Core Data's migration lookup.
+//
+// SideStore's PersistentContainer, when the on-disk store is incompatible with
+// the current model, looks for the older model with
+//     +[NSManagedObjectModel mergedModelFromBundles:forStoreMetadata:]
+//     (Swift: NSManagedObjectModel.mergedModel(from: Bundle.allBundles, forStoreMetadata:))
+// and throws Code=-23 "Unable to find any managed object models." when it returns nil.
+//
+// Inside LiveContainer the guest app is not a real app bundle: build_github.sh
+// renames SideStore.app to Frameworks/SideStoreApp.framework and dylibifies its
+// executable to MH_DYLIB, so CFBundle classifies it as a framework and Apple
+// documents +[NSBundle allBundles] as excluding frameworks. The guest's own
+// AltStore.momd (which ships every historical model version) therefore becomes
+// invisible to the migration lookup, migration can never start, and a stale store
+// can only be recovered by deleting it - which also wipes the signed-in accounts.
+//
+// This swizzle appends the guest's own bundle to +[NSBundle allBundles]. It is a
+// no-op when the bundle is already listed, and it only takes effect in the
+// SideStore guest process (this dylib is only injected there).
+
+// One-shot diagnostic: records whether the guest bundle was already in
+// allBundles before this fix, plus allFrameworks and the store path, so the
+// "is it bundle classification or a genuinely newer database?" question can be
+// settled from the device. Written once, to <app group>/esc-sidestore-diag.txt.
+static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
+    NSURL *groupURL = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:LCSharedUtils.appGroupID];
+    if (!groupURL) return;
+
+    NSString *diagPath = [groupURL URLByAppendingPathComponent:@"esc-sidestore-diag.txt"].path;
+    if ([NSFileManager.defaultManager fileExistsAtPath:diagPath]) return;
+
+    NSBundle *guest = NSBundle.mainBundle;
+    NSMutableString *out = [NSMutableString string];
+    [out appendFormat:@"guest mainBundle: %@\n", guest.bundlePath];
+    [out appendFormat:@"guest in allBundles BEFORE fix: %@\n", ([originalBundles containsObject:guest] ? @"YES" : @"NO")];
+
+    [out appendFormat:@"\nallBundles (%lu) BEFORE fix:\n", (unsigned long)originalBundles.count];
+    for (NSBundle *b in originalBundles) [out appendFormat:@"  %@\n", b.bundlePath];
+
+    NSArray<NSBundle*> *frameworks = NSBundle.allFrameworks;
+    [out appendFormat:@"\nallFrameworks (%lu):\n", (unsigned long)frameworks.count];
+    for (NSBundle *b in frameworks) [out appendFormat:@"  %@\n", b.bundlePath];
+
+    NSString *dbPath = [[groupURL URLByAppendingPathComponent:@"Database"] URLByAppendingPathComponent:@"SideStore.sqlite"].path;
+    [out appendFormat:@"\nstore: %@ exists=%@\n", dbPath, ([NSFileManager.defaultManager fileExistsAtPath:dbPath] ? @"YES" : @"NO")];
+
+    [out writeToFile:diagPath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+}
+
++ (NSArray<NSBundle*>*)hook_allBundles {
+    // exchange-style swizzle: this call reaches the original +[NSBundle allBundles]
+    NSArray<NSBundle*> *bundles = [NSBundle hook_allBundles];
+
+    // set the flag before doing any work: the diagnostic itself touches NSBundle
+    // APIs, so re-entrancy must not be able to re-enter this block.
+    static BOOL escDiagnosticWritten = NO;
+    if (!escDiagnosticWritten) {
+        escDiagnosticWritten = YES;
+        ESCWriteAllBundlesDiagnostic(bundles);
+    }
+
+    NSBundle *guest = NSBundle.mainBundle;
+    if (!guest || guest.bundlePath.length == 0) return bundles;
+    for (NSBundle *b in bundles) {
+        if ([b.bundlePath isEqualToString:guest.bundlePath]) return bundles;
+    }
+    return [bundles arrayByAddingObject:guest];
+}
+// ESC-END
+
 @end
 
 NSURL* SideStoreSource_hook_altStoreSourceURL(id self, SEL cmd) {
@@ -198,6 +268,9 @@ void installSideStoreHooks(void) {
     swizzle(NSBundle.class, @selector(altstoreAppGroup), @selector(hook_altstoreAppGroup));
     swizzleClassMethod(NSBundle.class, @selector(activeBundle), @selector(hook_activeBundle));
     swizzleClassMethod(NSBundle.class, @selector(baseAltStoreAppGroupID), @selector(hook_baseAltStoreAppGroupID));
+    // ESC-BEGIN: expose the guest's own bundle to Core Data's migration lookup
+    swizzleClassMethod(NSBundle.class, @selector(allBundles), @selector(hook_allBundles));
+    // ESC-END
     
     // replace altStoreSourceURL
     Method altStoreSourceURLMethod = class_getClassMethod(PrivClass(Source), @selector(altStoreSourceURL));
