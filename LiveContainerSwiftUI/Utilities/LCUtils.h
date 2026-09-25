@@ -69,4 +69,10 @@ typedef NS_ENUM(NSInteger, GeneratedIconStyle){
 @end
 BOOL saveCGImage(CGImageRef image, NSURL *url);
 CGImageRef loadCGImageFromURL(NSURL *url);
+// Register the light and dark variants of an app icon into a single
+// UIImageAsset so UIKit can resolve the correct variant for a trait collection
+// instead of the caller having to hard-code one. Returns nil when either
+// variant is missing so the caller can keep its previous single-variant
+// behaviour and never show a blank icon.
+UIImageAsset* LCCreateDynamicIconAsset(UIImage* lightImage, UIImage* darkImage);
 NSNumber *LCGetDefaultClassicMode(NSURL *appURL);

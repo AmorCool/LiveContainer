@@ -278,6 +278,34 @@ CGImageRef loadCGImageFromURL(NSURL *url) {
     return image;
 }
 
+UIImageAsset* LCCreateDynamicIconAsset(UIImage* lightImage, UIImage* darkImage) {
+    // Both variants are required. Returning nil lets the caller keep its plain
+    // single-variant icon, so a failed dark generation can never turn into a
+    // blank icon.
+    if(lightImage == nil || darkImage == nil) {
+        return nil;
+    }
+
+    // A fresh asset on purpose. The private UIImageAsset name registry
+    // (+_dynamicAssetNamed:generator:) keeps the first generator block alive
+    // forever, so icons would stay stale after -clearIconCache. The public
+    // registration path has no such global state.
+    UIImageAsset* asset = [[UIImageAsset alloc] init];
+    if(asset == nil) {
+        return nil;
+    }
+
+    // Tag each variant with the trait that identifies it. UIKit then resolves
+    // the matching image for whichever trait collection is requested, and can
+    // re-resolve it when the appearance changes.
+    [asset registerImage:lightImage
+     withTraitCollection:[UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleLight]];
+    [asset registerImage:darkImage
+     withTraitCollection:[UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleDark]];
+
+    return asset;
+}
+
 @implementation UIImage(LiveContainer)
 + (instancetype)generateIconForBundleURL:(NSURL*)url style:(GeneratedIconStyle)style hasBorder:(BOOL)hasBorder {
     static dispatch_once_t onceToken;

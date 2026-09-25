@@ -7,6 +7,14 @@
 #import "LCUtils.h"
 #import "../../LiveContainer/LCSharedUtils.h"
 
+@interface LCAppInfo ()
+// Loads one icon variant, using the in-memory cache, the on-disk cache and
+// finally icon generation. Returns nil when the variant cannot be produced.
+- (UIImage*)iconVariantIsDarkIcon:(BOOL)isDarkIcon;
+// Lazily builds the UIImageAsset that carries both variants. Returns nil when
+// either variant is unavailable, so callers can fall back to a plain image.
+- (UIImageAsset*)iconAsset;
+@end
 
 @implementation LCAppInfo
 
@@ -176,6 +184,67 @@
 }
 
 - (UIImage*)iconIsDarkIcon:(BOOL)isDarkIcon {
+    // Always make sure the requested variant exists first. This keeps the old
+    // "never return a blank icon" contract: if the dark variant cannot be
+    // produced we still have the light one below.
+    UIImage* variantIcon = [self iconVariantIsDarkIcon:isDarkIcon];
+
+    if(@available(iOS 18.0, *)) {
+        // Dark app icons only exist on iOS 18 and later. On older systems both
+        // variants would be identical, so we skip the extra work entirely.
+        UIImageAsset* asset = [self iconAsset];
+        if(asset != nil) {
+            // Pick the traits the asset should resolve for.
+            // - An explicit dark request always wins, so the user's setting is
+            //   never overridden by the current appearance.
+            // - Otherwise follow the current appearance, which is what makes the
+            //   icon switch on its own. When the current traits carry no style
+            //   (for example on a background queue) fall back to light, which is
+            //   the behaviour this method had before.
+            UITraitCollection* traits;
+            if(isDarkIcon) {
+                traits = [UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleDark];
+            } else {
+                UITraitCollection* currentTraits = UITraitCollection.currentTraitCollection;
+                if(currentTraits != nil && currentTraits.userInterfaceStyle != UIUserInterfaceStyleUnspecified) {
+                    traits = currentTraits;
+                } else {
+                    traits = [UITraitCollection traitCollectionWithUserInterfaceStyle:UIUserInterfaceStyleLight];
+                }
+            }
+
+            UIImage* dynamicIcon = [asset imageWithTraitCollection:traits];
+            if(dynamicIcon != nil) {
+                return dynamicIcon;
+            }
+        }
+    }
+
+    if(variantIcon == nil && isDarkIcon) {
+        // The dark variant was requested but could not be produced. Fall back
+        // to the light icon so the caller never ends up with a blank image.
+        return [self iconVariantIsDarkIcon:NO];
+    }
+
+    return variantIcon;
+}
+
+- (UIImageAsset*)iconAsset {
+    if(_iconAsset != nil) {
+        return _iconAsset;
+    }
+
+    // Both variants must be available. Generating the other variant is a
+    // deliberate cost of the dynamic icon: it happens once per app and the
+    // result is written to the on-disk cache.
+    UIImage* lightIcon = [self iconVariantIsDarkIcon:NO];
+    UIImage* darkIcon = [self iconVariantIsDarkIcon:YES];
+
+    _iconAsset = LCCreateDynamicIconAsset(lightIcon, darkIcon);
+    return _iconAsset;
+}
+
+- (UIImage*)iconVariantIsDarkIcon:(BOOL)isDarkIcon {
     // if icon is already loaded in memory, return it
     if(_cachedIcon && !isDarkIcon) {
         return _cachedIcon;
@@ -224,6 +293,9 @@
     [self setCachedColorDark:nil];
     _cachedIcon = nil;
     _cachedIconDark = nil;
+    // Drop the asset too, otherwise it would keep serving the icons we just
+    // removed from disk and memory.
+    _iconAsset = nil;
 }
 
 - (UIImage *)generateLiveContainerWrappedIconWithStyle:(GeneratedIconStyle)style {

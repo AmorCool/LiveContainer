@@ -19,6 +19,9 @@ typedef NS_ENUM(NSInteger, MultitaskSpecified){
     NSMutableDictionary* _info;
     NSMutableDictionary* _infoPlist;
     NSString* _bundlePath;
+    // Holds the light and dark icon variants as one UIImageAsset so UIKit can
+    // resolve the icon for a trait collection. Rebuilt by -clearIconCache.
+    UIImageAsset* _iconAsset;
 }
 @property NSString* relativeBundlePath;
 @property bool isShared;
