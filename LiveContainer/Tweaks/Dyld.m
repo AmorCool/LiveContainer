@@ -68,18 +68,59 @@ static void overwriteAppExecutableFileType(void) {
     }
 }
 
-static inline int translateImageIndex(int origin) {
-    if(origin == lcImageIndex) {
+// ESC-BEGIN: hide LC-owned images by path matching instead of rewriting dli_fname
+// This is exactly the set of images that used to be renamed to a fake
+// "/usr/lib/<address>.dylib" path: everything inside the LiveContainer bundle
+// plus anything from a Procursus (jailbreak) prefix.
+static bool isHostImagePath(const char* path) {
+    if(!path) {
+        return false;
+    }
+    if(lcMainBundlePath && !strncmp(path, lcMainBundlePath, strlen(lcMainBundlePath))) {
+        return true;
+    }
+    if(strstr(path, "/procursus/") != NULL) {
+        return true;
+    }
+    return false;
+}
+
+static bool isHiddenImageIndex(uint32_t realIndex) {
+    // the guest app itself must stay visible
+    if(realIndex == appMainImageIndex) {
+        return false;
+    }
+    return isHostImagePath(orig_dyld_get_image_name(realIndex));
+}
+
+static inline uint32_t translateImageIndex(uint32_t guestIndex) {
+    // guest index 0 is the guest app itself, so it maps to appMainImageIndex.
+    // Every other guest index is counted over the real image list with all
+    // hidden (LC-owned) images skipped, so indices are fully remapped.
+    if(appMainImageIndex == 0) {
+        return guestIndex;
+    }
+    if(guestIndex == 0) {
         if(!appExecutableFileTypeOverwritten) {
             overwriteAppExecutableFileType();
             appExecutableFileTypeOverwritten = true;
         }
-        
         return appMainImageIndex;
     }
     
-    return origin;
+    uint32_t real = orig_dyld_image_count();
+    uint32_t seen = 0;
+    for(uint32_t r = 0; r < real; ++r) {
+        if(r == appMainImageIndex || isHiddenImageIndex(r)) {
+            continue;
+        }
+        if(++seen == guestIndex) {
+            return r;
+        }
+    }
+    return real ? real - 1 : 0;
 }
+// ESC-END
 
 void* hook_dlsym(void * __handle, const char * __symbol) {
     if(__handle == (void*)RTLD_MAIN_ONLY) {
@@ -109,7 +150,19 @@ void* hook_dlsym(void * __handle, const char * __symbol) {
 }
 
 uint32_t hook_dyld_image_count(void) {
-    return orig_dyld_image_count() - 1 - (uint32_t)tweakLoaderLoaded;
+    // ESC-BEGIN: report the real count minus every LC-owned image we hide
+    if(appMainImageIndex == 0) {
+        return orig_dyld_image_count();
+    }
+    uint32_t real = orig_dyld_image_count();
+    uint32_t hidden = 0;
+    for(uint32_t r = 0; r < real; ++r) {
+        if(isHiddenImageIndex(r)) {
+            ++hidden;
+        }
+    }
+    return real - hidden;
+    // ESC-END
 }
 
 const struct mach_header* hook_dyld_get_image_header(uint32_t image_index) {
@@ -124,22 +177,12 @@ const char* hook_dyld_get_image_name(uint32_t image_index) {
     __attribute__((musttail)) return orig_dyld_get_image_name(translateImageIndex(image_index));
 }
 
-void hideLiveContainerImageCallback(const struct mach_header* header, intptr_t vmaddr_slide) {
-    Dl_info info;
-    dladdr(header, &info);
-    if(!strncmp(info.dli_fname, lcMainBundlePath, strlen(lcMainBundlePath)) || strstr(info.dli_fname, "/procursus/") != 0) {
-        char fakePath[PATH_MAX];
-        snprintf(fakePath, sizeof(fakePath), "/usr/lib/%p.dylib", header);
-        kern_return_t ret = vm_protect(mach_task_self(), (vm_address_t)info.dli_fname, PATH_MAX, false, PROT_READ | PROT_WRITE);
-        if(ret != KERN_SUCCESS) {
-            os_thread_self_restrict_tpro_to_rw();
-        }
-        strcpy((char *)info.dli_fname, fakePath);
-        if(ret != KERN_SUCCESS) {
-            os_thread_self_restrict_tpro_to_ro();
-        }
-    }
-}
+// ESC-BEGIN: hideLiveContainerImageCallback was removed on purpose.
+// It used to overwrite dli_fname with "/usr/lib/<mmap address>.dylib", which was
+// both a fingerprint and an ASLR leak. LC-owned images are now removed from the
+// guest-visible image list by isHiddenImageIndex()/translateImageIndex(), so no
+// per-image name rewrite (and no vm_protect on dyld's strings) is needed anymore.
+// ESC-END
 
 void* getDSCAddr(void) {
     task_dyld_info_data_t dyldInfo;
@@ -375,7 +418,10 @@ void DyldHooksInit(bool hideLiveContainer, bool hookDlopen, uint32_t spoofSDKVer
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, _dyld_get_image_header, hook_dyld_get_image_header, nil);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, _dyld_get_image_vmaddr_slide, hook_dyld_get_image_vmaddr_slide, nil);
         litehook_rebind_symbol(LITEHOOK_REBIND_GLOBAL, _dyld_get_image_name, hook_dyld_get_image_name, nil);
-        _dyld_register_func_for_add_image((void (*)(const struct mach_header *, intptr_t))hideLiveContainerImageCallback);
+        // ESC-BEGIN: no add-image callback is needed anymore, the guest-visible image
+        // list is computed on demand by hook_dyld_image_count/translateImageIndex.
+        // (was: _dyld_register_func_for_add_image(hideLiveContainerImageCallback))
+        // ESC-END
     }
     
     appExecutableFileTypeOverwritten = !hideLiveContainer;
@@ -623,7 +669,12 @@ void* jitless_hook_mmap(void *addr, size_t len, int prot, int flags, int fd, off
     char filePath[PATH_MAX];
     if (fcntl(fd, F_GETPATH, filePath) != 0) return map;
     char newTmpPath[PATH_MAX];
-    sprintf(newTmpPath, "%s/Documents/%p.dylib", getenv("LP_HOME_PATH"), addr);
+    // ESC-BEGIN: random temp name. The old name embedded the mmap address, which
+    // leaked an ASLR-derived code address through the file name.
+    uint64_t randomName = 0;
+    arc4random_buf(&randomName, sizeof(randomName));
+    snprintf(newTmpPath, sizeof(newTmpPath), "%s/Documents/%016llx.dylib", getenv("LP_HOME_PATH"), (unsigned long long)randomName);
+    // ESC-END
     rename(filePath, newTmpPath);
     map = __mmap(addr, len, prot, flags, fd, offset);
     rename(newTmpPath, filePath);
@@ -727,7 +778,9 @@ kern_return_t catch_mach_exception_raise_state( mach_port_t exception_port, exce
         arm_thread_state64_set_pc_fptr(*new, hook_os_variant_has_internal_content);
         return KERN_SUCCESS;
     }
-    NSLog(@"[DyldLVBypass] Unknown breakpoint at pc: %p", (void*)pc);
+    // ESC-BEGIN: do not log the breakpoint address (it is a raw code pointer)
+    NSLog(@"[DyldLVBypass] Unknown breakpoint");
+    // ESC-END
     return KERN_FAILURE;
 }
 
