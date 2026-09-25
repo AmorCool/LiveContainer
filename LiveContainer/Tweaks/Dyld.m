@@ -77,7 +77,15 @@ static bool isHostImagePath(const char* path) {
         return false;
     }
     if(lcMainBundlePath && !strncmp(path, lcMainBundlePath, strlen(lcMainBundlePath))) {
-        return true;
+        // lcMainBundlePath is the LiveContainer.app directory itself, so the plain
+        // prefix match also covers <LiveContainer.app>/Frameworks/SideStoreApp.framework
+        // -- i.e. the built-in SideStore, which is a guest and not ours to hide.
+        // Excluding it is what keeps SideStore usable when hideLiveContainer is on.
+        // SideStoreSupport.framework is deliberately NOT excluded: it is LC's own shim
+        // and the guest has no idea it exists, so hiding it is correct.
+        if(strstr(path, "/Frameworks/SideStoreApp.framework/") == NULL) {
+            return true;
+        }
     }
     if(strstr(path, "/procursus/") != NULL) {
         return true;
@@ -118,7 +126,16 @@ static inline uint32_t translateImageIndex(uint32_t guestIndex) {
             return r;
         }
     }
-    return real ? real - 1 : 0;
+    // guestIndex is past the end of the guest-visible list (only possible for a
+    // stale/out-of-range index, since hook_dyld_image_count() reports exactly the
+    // number of indices this loop can resolve). The old fallback returned
+    // `real - 1`, i.e. the last image of the *real* list -- and that slot is
+    // frequently one of the LC-owned images we are trying to hide, so the fallback
+    // could hand a hidden image back to the guest. Return the guest's own main
+    // image instead: isHiddenImageIndex() exempts it, so it is always visible, and
+    // it is the least surprising answer for an index that is already out of range.
+    // (appMainImageIndex is guaranteed non-zero here by the early return above.)
+    return appMainImageIndex;
 }
 // ESC-END
 
@@ -151,6 +168,16 @@ void* hook_dlsym(void * __handle, const char * __symbol) {
 
 uint32_t hook_dyld_image_count(void) {
     // ESC-BEGIN: report the real count minus every LC-owned image we hide
+    // NOTE: the count is recomputed dynamically as real - hidden, so loading a
+    // *hidden* image (TweakLoader.dylib / SideStoreSupport, both dlopen'd after
+    // DyldHooksInit) leaves it unchanged. CoreFoundation's
+    // _CFBundleDYLDCopyLoadedImagePathsIfChanged() keys its rebuild on this value,
+    // so such a load does not trigger a rebuild -- which is exactly the intent, the
+    // image is meant to be invisible to the guest. This is safe because every
+    // *visible* image load still changes the count (real+1 while hidden stays put),
+    // so no guest-visible image is ever missing from CF's list. Do not "fix" this by
+    // making the count change on every real change: that would break the invariant
+    // that indices 0..count-1 map one-to-one onto the visible images.
     if(appMainImageIndex == 0) {
         return orig_dyld_image_count();
     }
