@@ -6,7 +6,32 @@
 import SwiftUI
 
 struct LCAppSkeletonBanner: View {
+    // ESC-BEGIN app list grid layout - defaulted so the existing call site keeps working
+    var layoutMode: LCAppListLayoutMode = .list
+    // ESC-END
+
     var body: some View {
+        // ESC-BEGIN app list grid layout
+        if layoutMode == .grid {
+            VStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: LCAppBannerRootView.gridIconSize, height: LCAppBannerRootView.gridIconSize)
+
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color.gray.opacity(0.3))
+                    .frame(width: 56, height: 12)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: LCAppBannerRootView.gridBannerHeight)
+            .background(RoundedRectangle(cornerRadius: 22).fill(Color.gray.opacity(0.1)))
+        } else {
+            listSkeleton
+        }
+        // ESC-END
+    }
+
+    private var listSkeleton: some View {
         HStack {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.gray.opacity(0.3))

@@ -25,13 +25,20 @@ struct LCAppBanner: UIViewControllerRepresentable {
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
     private let sharedModel = DataManager.shared.model
 
-    init(appModel: LCAppModel, delegate: LCAppBannerDelegate) {
+    // ESC-BEGIN app list grid layout
+    /// Rendering mode of this banner. Defaults to `.list`, so every existing call
+    /// site keeps compiling and keeps the original row layout.
+    var layoutMode: LCAppListLayoutMode = .list
+    // ESC-END
+
+    init(appModel: LCAppModel, delegate: LCAppBannerDelegate, layoutMode: LCAppListLayoutMode = .list) {
         _model = ObservedObject(wrappedValue: appModel)
         self.delegate = delegate
+        self.layoutMode = layoutMode
     }
 
     func makeUIViewController(context: Context) -> UIViewController {
-        let viewController = LCAppBannerViewController(delegate: delegate, config: LCAppBannerConfiguration(model: model, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon))
+        let viewController = LCAppBannerViewController(delegate: delegate, config: LCAppBannerConfiguration(model: model, dynamicColors: dynamicColors, darkModeIcon: darkModeIcon, layoutMode: layoutMode))
         return viewController
     }
 
@@ -42,7 +49,8 @@ struct LCAppBanner: UIViewControllerRepresentable {
         viewController.update(
             model: model,
             dynamicColors: dynamicColors,
-            darkModeIcon: darkModeIcon
+            darkModeIcon: darkModeIcon,
+            layoutMode: layoutMode
         )
     }
 
@@ -51,6 +59,9 @@ struct LCAppBanner: UIViewControllerRepresentable {
         guard let width = proposal.width else {
             return nil
         }
-        return CGSize(width: width, height: LCAppBannerRootView.bannerHeight)
+        // ESC-BEGIN app list grid layout - report the compact tile height in grid mode
+        let height = layoutMode == .grid ? LCAppBannerRootView.gridBannerHeight : LCAppBannerRootView.bannerHeight
+        return CGSize(width: width, height: height)
+        // ESC-END
     }
 }

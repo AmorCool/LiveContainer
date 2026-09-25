@@ -8,6 +8,12 @@ import UIKit
 
 final class LCAppBannerRootView: UIView {
     static let bannerHeight: CGFloat = 88
+    // ESC-BEGIN app list grid layout - compact tile metrics
+    /// Icon size of a grid tile. Slightly smaller than the row icon.
+    static let gridIconSize: CGFloat = 56
+    /// Height of a grid tile: 10 top inset + icon + 6 gap + one name line + 10 bottom inset.
+    static let gridBannerHeight: CGFloat = 102
+    // ESC-END
 
     let runControl = LCAppBannerRunControl()
 
@@ -27,8 +33,21 @@ final class LCAppBannerRootView: UIView {
     private let nameStack = UIStackView()
     private let detailStack = UIStackView()
 
+    // ESC-BEGIN app list grid layout - layout state
+    /// Current rendering mode. `.list` is the original row and is the default.
+    private(set) var layoutMode: LCAppListLayoutMode = .list
+    /// Constraints of the original row layout. Active by default.
+    private var listLayoutConstraints: [NSLayoutConstraint] = []
+    /// Constraints of the compact grid tile. Only activated in grid mode.
+    private var gridLayoutConstraints: [NSLayoutConstraint] = []
+    // ESC-END
+
     override var intrinsicContentSize: CGSize {
-        CGSize(width: UIView.noIntrinsicMetric, height: Self.bannerHeight)
+        // ESC-BEGIN app list grid layout - the tile is shorter than the row. This
+        // is what sizes the banner on iOS 15, where `sizeThatFits` does not exist.
+        let height = layoutMode == .grid ? Self.gridBannerHeight : Self.bannerHeight
+        return CGSize(width: UIView.noIntrinsicMetric, height: height)
+        // ESC-END
     }
 
     override init(frame: CGRect) {
@@ -99,12 +118,28 @@ final class LCAppBannerRootView: UIView {
         addSubview(detailStack)
         addSubview(runControl)
 
-        NSLayoutConstraint.activate([
+        // These two sets never change between modes, so they are always active.
+        let backgroundConstraints = [
             visualBackgroundView.leadingAnchor.constraint(equalTo: leadingAnchor),
             visualBackgroundView.trailingAnchor.constraint(equalTo: trailingAnchor),
             visualBackgroundView.topAnchor.constraint(equalTo: topAnchor),
-            visualBackgroundView.bottomAnchor.constraint(equalTo: bottomAnchor),
+            visualBackgroundView.bottomAnchor.constraint(equalTo: bottomAnchor)
+        ]
 
+        // The run control keeps its constraints in both modes. In grid mode it is
+        // only hidden, which keeps its frame valid for the double tap hit test.
+        let runControlConstraints = [
+            runControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            runControl.centerYAnchor.constraint(equalTo: centerYAnchor),
+            runControl.widthAnchor.constraint(equalToConstant: 70),
+            runControl.heightAnchor.constraint(equalToConstant: 32)
+        ]
+
+        // ESC-BEGIN app list grid layout - the icon and the detail stack move
+        // between modes, so they get one constraint set per mode. The list set is
+        // the original layout and stays active by default, which means the row
+        // rendering is byte for byte the same as before this change.
+        listLayoutConstraints = [
             iconImageView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
             iconImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
             iconImageView.widthAnchor.constraint(equalToConstant: 60),
@@ -112,14 +147,62 @@ final class LCAppBannerRootView: UIView {
 
             detailStack.leadingAnchor.constraint(equalTo: iconImageView.trailingAnchor, constant: 10),
             detailStack.trailingAnchor.constraint(lessThanOrEqualTo: runControl.leadingAnchor, constant: -10),
-            detailStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            detailStack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ]
 
-            runControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
-            runControl.centerYAnchor.constraint(equalTo: centerYAnchor),
-            runControl.widthAnchor.constraint(equalToConstant: 70),
-            runControl.heightAnchor.constraint(equalToConstant: 32)
-        ])
+        // Compact tile: icon on top, name underneath, both centred.
+        gridLayoutConstraints = [
+            iconImageView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            iconImageView.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            iconImageView.widthAnchor.constraint(equalToConstant: Self.gridIconSize),
+            iconImageView.heightAnchor.constraint(equalToConstant: Self.gridIconSize),
+
+            detailStack.topAnchor.constraint(equalTo: iconImageView.bottomAnchor, constant: 6),
+            detailStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
+            detailStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6)
+        ]
+        // ESC-END
+
+        NSLayoutConstraint.activate(backgroundConstraints + runControlConstraints + listLayoutConstraints)
     }
+
+    // ESC-BEGIN app list grid layout
+    /// Switches between the original row layout and the compact grid tile.
+    ///
+    /// Safe to call repeatedly. Only the layout of this view is touched here:
+    /// every interaction (run, double tap, context menu, JIT, uninstall) lives in
+    /// `LCAppBannerViewController` and keeps working unchanged in both modes.
+    func applyLayoutMode(_ mode: LCAppListLayoutMode) {
+        // `updateUIViewController` runs on every SwiftUI render, so bail out when
+        // nothing changed instead of churning the constraint activation.
+        guard mode != layoutMode else {
+            return
+        }
+        layoutMode = mode
+        let isGrid = mode == .grid
+
+        if isGrid {
+            NSLayoutConstraint.deactivate(listLayoutConstraints)
+            NSLayoutConstraint.activate(gridLayoutConstraints)
+        } else {
+            NSLayoutConstraint.deactivate(gridLayoutConstraints)
+            NSLayoutConstraint.activate(listLayoutConstraints)
+        }
+
+        // Row only subviews.
+        versionLabel.isHidden = isGrid
+        containerLabel.isHidden = isGrid
+        runControl.isHidden = isGrid
+        // The tile shows the name alone, so the trailing spacer is removed and the
+        // name is allowed to stretch and centre itself inside the tile.
+        nameSpacer.isHidden = isGrid
+        nameLabel.textAlignment = isGrid ? .center : .natural
+        nameLabel.setContentHuggingPriority(isGrid ? .defaultLow : .required, for: .horizontal)
+
+        invalidateIntrinsicContentSize()
+        setNeedsLayout()
+    }
+    // ESC-END
 
     private func configureLabel(_ label: UILabel, font: UIFont) {
         label.font = font
@@ -145,20 +228,26 @@ final class LCAppBannerRootView: UIView {
         nameLabel.textColor = .label
         versionLabel.text = "\(model.version) - \(model.bundleIdentifier)"
         versionLabel.textColor = textColor
+        // ESC-BEGIN app list grid layout - a tile shows the icon and the name only,
+        // so the remark line and every badge are suppressed in grid mode. The
+        // information itself is untouched and is still available in list mode and
+        // in the app settings screen.
+        let isGrid = layoutMode == .grid
+        // ESC-END
         remarkLabel.text = model.uiRemark
         remarkLabel.textColor = textColor.withAlphaComponent(0.8)
-        remarkLabel.isHidden = model.uiRemark.isEmpty
+        remarkLabel.isHidden = isGrid || model.uiRemark.isEmpty
         containerLabel.text = model.uiSelectedContainer?.name ?? "lc.appBanner.noDataFolder".loc
         containerLabel.textColor = textColor
 
-        sharedBadge.isHidden = !model.uiIsShared
+        sharedBadge.isHidden = isGrid || !model.uiIsShared
         sharedBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
-        jitBadge.isHidden = !model.uiIsJITNeeded
+        jitBadge.isHidden = isGrid || !model.uiIsJITNeeded
         jitBadge.backgroundColor = UIColor(named: "JITBadgeColor") ?? .systemPurple
-        lockBadge.isHidden = !model.uiIsLocked || model.uiIsHidden
+        lockBadge.isHidden = isGrid || !model.uiIsLocked || model.uiIsHidden
         lockBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
 #if is32BitSupported
-        bit32Badge.isHidden = !model.uiIs32bit
+        bit32Badge.isHidden = isGrid || !model.uiIs32bit
         bit32Badge.backgroundColor = UIColor(named: "32BitBadgeColor") ?? .systemBlue
 #endif
 

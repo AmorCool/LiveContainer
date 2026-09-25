@@ -11,6 +11,10 @@ struct LCAppBannerConfiguration {
     let model: LCAppModel
     let dynamicColors: Bool
     let darkModeIcon: Bool
+    // ESC-BEGIN app list grid layout - defaulted so the memberwise initialiser
+    // stays source compatible with every existing call site.
+    var layoutMode: LCAppListLayoutMode = .list
+    // ESC-END
 }
 
 
@@ -20,6 +24,10 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     private let bannerView = LCAppBannerRootView()
     private var configuration: LCAppBannerConfiguration
     private var exportTemporaryDirectory: URL?
+    // ESC-BEGIN app list grid layout
+    /// Enabled only in grid mode, where a single tap launches the app.
+    private var singleTapGesture: UITapGestureRecognizer?
+    // ESC-END
     
     init(delegate: LCAppBannerDelegate, config: LCAppBannerConfiguration) {
         self.delegate = delegate
@@ -46,6 +54,20 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
         doubleTapGesture.numberOfTapsRequired = 2
         doubleTapGesture.cancelsTouchesInView = false
         bannerView.addGestureRecognizer(doubleTapGesture)
+
+        // ESC-BEGIN app list grid layout
+        // In grid mode the run button is hidden, so a single tap on the tile
+        // launches the app, mirroring the home screen. The gesture is disabled in
+        // list mode, which keeps the original row behaviour untouched.
+        // `require(toFail:)` lets the double tap (settings) still win.
+        let singleTapGesture = UITapGestureRecognizer(target: self, action: #selector(bannerSingleTapped))
+        singleTapGesture.numberOfTapsRequired = 1
+        singleTapGesture.cancelsTouchesInView = false
+        singleTapGesture.isEnabled = false
+        singleTapGesture.require(toFail: doubleTapGesture)
+        bannerView.addGestureRecognizer(singleTapGesture)
+        self.singleTapGesture = singleTapGesture
+        // ESC-END
     }
 
     override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -62,14 +84,27 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     func update(
         model: LCAppModel,
         dynamicColors: Bool,
-        darkModeIcon: Bool
+        darkModeIcon: Bool,
+        layoutMode: LCAppListLayoutMode = .list
     ) {
         loadViewIfNeeded()
         configuration = LCAppBannerConfiguration(
             model: model,
             dynamicColors: dynamicColors,
-            darkModeIcon: darkModeIcon
+            darkModeIcon: darkModeIcon,
+            layoutMode: layoutMode
         )
+        // ESC-BEGIN app list grid layout
+        // Apply the layout before refreshing so the refresh already sees the new mode.
+        singleTapGesture?.isEnabled = layoutMode == .grid
+        bannerView.applyLayoutMode(layoutMode)
+        // SwiftUI falls back to `preferredContentSize` to size the representable on
+        // iOS 15, so keep it in sync with the mode as well.
+        preferredContentSize = CGSize(
+            width: 0,
+            height: layoutMode == .grid ? LCAppBannerRootView.gridBannerHeight : LCAppBannerRootView.bannerHeight
+        )
+        // ESC-END
         refreshView()
     }
 
@@ -84,12 +119,30 @@ final class LCAppBannerViewController: UIViewController, UIContextMenuInteractio
     }
 
     @objc private func bannerDoubleTapped(_ gestureRecognizer: UITapGestureRecognizer) {
-        let location = gestureRecognizer.location(in: bannerView.runControl)
-        guard !bannerView.runControl.bounds.contains(location) else {
-            return
+        // ESC-BEGIN app list grid layout
+        // The run control only exists as a visible control in list mode. In grid
+        // mode the whole tile is tappable, so the hit test is skipped.
+        if configuration.layoutMode == .list {
+            let location = gestureRecognizer.location(in: bannerView.runControl)
+            guard !bannerView.runControl.bounds.contains(location) else {
+                return
+            }
         }
+        // ESC-END
         openSettings()
     }
+
+    // ESC-BEGIN app list grid layout
+    /// Grid tile tap: launch the app through the exact same code path as the run
+    /// button, so the JIT flow, the multitask handling and the locked app
+    /// authentication all behave identically.
+    @objc private func bannerSingleTapped(_ gestureRecognizer: UITapGestureRecognizer) {
+        guard configuration.layoutMode == .grid else {
+            return
+        }
+        runButtonTapped()
+    }
+    // ESC-END
 
     @objc private func runButtonTapped() {
         if #available(iOS 16.0, *),

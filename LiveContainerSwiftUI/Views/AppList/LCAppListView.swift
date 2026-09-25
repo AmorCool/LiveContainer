@@ -80,6 +80,12 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
     
     @AppStorage("LCMultitaskMode", store: LCUtils.appGroupUserDefault) var multitaskMode: MultitaskMode = .virtualWindow
     @AppStorage("darkModeIcon", store: LCUtils.appGroupUserDefault) private var darkModeIcon = false
+    // ESC-BEGIN app list grid layout
+    /// Persisted list / grid preference, stored in the same app group defaults as
+    /// the other UI preferences. `.list` is the default, so an existing user sees
+    /// exactly the same screen after updating.
+    @AppStorage("LCAppListLayoutMode", store: LCUtils.appGroupUserDefault) private var appListLayoutMode: LCAppListLayoutMode = .list
+    // ESC-END
     
     @State private var isViewAppeared = false
     
@@ -131,31 +137,41 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                 })
                 .hidden()
                 
-                LazyVStack {
+                // ESC-BEGIN app list grid layout
+                // Only the container is swapped. The ForEach body, the transition
+                // and the animation are untouched, so the row content and its
+                // interactions are identical in both modes.
+                LCAppLayoutContainer(mode: appListLayoutMode) {
                     ForEach(filteredApps, id: \.self) { app in
-                        LCAppBanner(appModel: app, delegate: self)
+                        LCAppBanner(appModel: app, delegate: self, layoutMode: appListLayoutMode)
                     }
                     .transition(.scale)
                 }
+                // ESC-END
                 .padding()
                 .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredApps)
 
                 VStack {
                     if LCUtils.appGroupUserDefault.bool(forKey: "LCStrictHiding") {
                         if sharedModel.isHiddenAppUnlocked {
-                            LazyVStack {
+                            // ESC-BEGIN app list grid layout - the section header stays
+                            // outside the grid container, otherwise it would become a cell.
+                            VStack {
                                 HStack {
                                     Text("lc.appList.hiddenApps".loc)
                                         .font(.system(.title2).bold())
                                     Spacer()
                                 }
                                 
-                                ForEach(filteredHiddenApps, id: \.self) { app in
-                                    LCAppBanner(appModel: app, delegate: self)
+                                LCAppLayoutContainer(mode: appListLayoutMode) {
+                                    ForEach(filteredHiddenApps, id: \.self) { app in
+                                        LCAppBanner(appModel: app, delegate: self, layoutMode: appListLayoutMode)
+                                    }
+                                    .transition(.scale)
                                 }
-                                .transition(.scale)
                                 
                             }
+                            // ESC-END
                             .padding()
                             .transition(.opacity)
                             .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
@@ -166,24 +182,36 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                             }
                         }
                     } else if sharedModel.hiddenApps.count > 0 {
-                        LazyVStack {
+                        // ESC-BEGIN app list grid layout - header kept outside the container
+                        VStack {
                             HStack {
                                 Text("lc.appList.hiddenApps".loc)
                                     .font(.system(.title2).bold())
                                 Spacer()
                             }
-                            ForEach(filteredHiddenApps, id: \.self) { app in
-                                if sharedModel.isHiddenAppUnlocked {
-                                    LCAppBanner(appModel: app, delegate: self)
-                                } else {
-                                    LCAppSkeletonBanner()
+                            LCAppLayoutContainer(mode: appListLayoutMode) {
+                                ForEach(filteredHiddenApps, id: \.self) { app in
+                                    if sharedModel.isHiddenAppUnlocked {
+                                        LCAppBanner(appModel: app, delegate: self, layoutMode: appListLayoutMode)
+                                    } else {
+                                        LCAppSkeletonBanner(layoutMode: appListLayoutMode)
+                                    }
+                                }
+                                .animation(.easeInOut, value: sharedModel.isHiddenAppUnlocked)
+                                .onTapGesture {
+                                    // ESC-BEGIN app list grid layout
+                                    // In grid mode a tap on a tile already launches the
+                                    // app through `LCAppBanner`. The unlock tap is only
+                                    // needed while the skeletons are shown. List mode is
+                                    // kept exactly as it was.
+                                    if appListLayoutMode == .list || !sharedModel.isHiddenAppUnlocked {
+                                        Task { await authenticateUser() }
+                                    }
+                                    // ESC-END
                                 }
                             }
-                            .animation(.easeInOut, value: sharedModel.isHiddenAppUnlocked)
-                            .onTapGesture {
-                                Task { await authenticateUser() }
-                            }
                         }
+                        // ESC-END
                         .padding()
                         .animation(searchContext.isTyping ? nil : .easeInOut, value: filteredHiddenApps)
                     }
@@ -283,6 +311,18 @@ struct LCAppListView : View, LCAppBannerDelegate, LCAppModelDelegate {
                         Label("Sort by", systemImage: "line.3.horizontal.decrease.circle")
                     }
                 }
+                
+                // ESC-BEGIN app list grid layout
+                // The switch itself. The state is persisted through `appListLayoutMode`,
+                // so the choice survives relaunches. The label comes from
+                // `lc.appList.gridMode` / `lc.appList.listMode` in the shared
+                // localisation catalog.
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(appListLayoutMode.toggleDisplayName, systemImage: appListLayoutMode.toggleSystemImage) {
+                        appListLayoutMode = appListLayoutMode.toggled
+                    }
+                }
+                // ESC-END
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
