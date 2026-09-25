@@ -19,6 +19,11 @@ def fetch_latest_release(repo_url, is_nightly: bool):
     headers = {
         "Accept": "application/vnd.github+json",
     }
+    # 未认证的 GitHub API 只有 60 次/小时/IP，共享 runner 上常被打满 -> 403 rate limit exceeded。
+    # 带上 workflow 里已传进来的 GITHUB_TOKEN（1000 次/小时）即可稳定通过。
+    _token = os.environ.get("GITHUB_TOKEN")
+    if _token:
+        headers["Authorization"] = f"Bearer {_token}"
     try:
         response = requests.get(api_url, headers=headers)
         response.raise_for_status()
