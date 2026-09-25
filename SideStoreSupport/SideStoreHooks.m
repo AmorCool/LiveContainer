@@ -10,6 +10,11 @@
 #import <sys/sysctl.h>
 @import UserNotifications;
 @import UIKit;
+// ESC: Core Data is needed to read the guest's AltStore.momd and the on-disk
+// store metadata. Autolinking is already relied upon in this file for
+// UserNotifications/UIKit (neither is listed in the project's Frameworks
+// phase), so `@import CoreData;` adds no manual link step.
+@import CoreData;
 
 @interface LCAuthorizedNotificationSettings : UNNotificationSettings
 @end
@@ -64,6 +69,124 @@ static id SSSceneObserver;
 
 @end
 
+// ESC-BEGIN: deterministic app group resolution for the SideStore guest.
+//
+// Upstream +[LCSharedUtils appGroupID] (LiveContainer/LCSharedUtils.m) picks
+// between
+//     group.com.SideStore.SideStore.<teamId>
+//     group.com.rileytestut.AltStore.<teamId>
+// preferring whichever already contains an "Apps" directory, and falls back to
+// @"Unknown" when neither yields a container URL. It is dispatch_once-cached
+// per process but NOT remembered across launches, so the picked group can
+// change between launches. SideStore keys its Core Data store off
+// +[NSBundle altstoreAppGroup], so a change makes it look at a different
+// Database/SideStore.sqlite (user appears signed out), and @"Unknown" makes
+// containerURLForSecurityApplicationGroupIdentifier: return nil so SideStore
+// silently falls back to a brand new private empty store. Both present as
+// "my account disappeared".
+//
+// This shim pins the value: the group that worked last time is remembered and
+// reused, the two upstream candidates are tried in upstream's order, and when
+// nothing is usable we log loudly and still return a real candidate so that
+// SideStore fails visibly instead of silently creating an empty store.
+// LCSharedUtils itself is deliberately left untouched (upstream file).
+
+static NSString * const ESCStableAppGroupKey = @"ESCStableAppGroupID";
+static NSString * const ESCUnknownAppGroup = @"Unknown";
+
+// The remembered group is stored in the shared (app group) defaults, and also
+// mirrored into standardUserDefaults. The shared defaults' suite name is itself
+// derived from +[LCSharedUtils appGroupID] (LiveContainer/LCBootstrap.m), i.e.
+// it moves together with the very value we are trying to pin, so it cannot be
+// the only copy. standardUserDefaults does not depend on the app group and
+// therefore survives such a flip.
+static NSString *ESCReadStableAppGroup(void) {
+    NSString *value = [NSUserDefaults.lcSharedDefaults stringForKey:ESCStableAppGroupKey];
+    if (value.length) return value;
+    return [NSUserDefaults.standardUserDefaults stringForKey:ESCStableAppGroupKey];
+}
+
+static void ESCRememberStableAppGroup(NSString *groupID) {
+    [NSUserDefaults.lcSharedDefaults setObject:groupID forKey:ESCStableAppGroupKey];
+    [NSUserDefaults.standardUserDefaults setObject:groupID forKey:ESCStableAppGroupKey];
+    [NSUserDefaults.lcSharedDefaults synchronize];
+    [NSUserDefaults.standardUserDefaults synchronize];
+}
+
+static BOOL ESCAppGroupIsUsable(NSString *groupID) {
+    if (groupID.length == 0) return NO;
+    if ([groupID isEqualToString:ESCUnknownAppGroup]) return NO;
+    return [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:groupID] != nil;
+}
+
+// Upstream candidate order. teamIdentifier can be nil on some jailbreaks, in
+// which case the "<base>.<teamId>" ids cannot be built at all.
+static NSArray<NSString *> *ESCCandidateAppGroups(void) {
+    NSString *team = LCSharedUtils.teamIdentifier;
+    if (team.length == 0) return @[];
+    return @[
+        [@"group.com.SideStore.SideStore." stringByAppendingString:team],
+        [@"group.com.rileytestut.AltStore." stringByAppendingString:team],
+    ];
+}
+
+static NSString *ESCResolveStableAppGroup(void) {
+    static NSString *resolved = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        // 1. reuse the group that worked on a previous launch, if still usable
+        NSString *remembered = ESCReadStableAppGroup();
+        if (ESCAppGroupIsUsable(remembered)) {
+            resolved = remembered;
+            NSLog(@"[ESC] app group: reusing remembered %@", remembered);
+            return;
+        }
+
+        NSArray<NSString *> *candidates = ESCCandidateAppGroups();
+
+        // 2. upstream's first choice: a candidate that already holds "Apps"
+        for (NSString *group in candidates) {
+            NSURL *url = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:group];
+            if (!url) continue;
+            if ([NSFileManager.defaultManager fileExistsAtPath:[url URLByAppendingPathComponent:@"Apps"].path]) {
+                resolved = group;
+                break;
+            }
+        }
+
+        // 3. otherwise the first candidate that at least yields a container URL
+        if (!resolved) {
+            for (NSString *group in candidates) {
+                if (ESCAppGroupIsUsable(group)) {
+                    resolved = group;
+                    break;
+                }
+            }
+        }
+
+        // 4. otherwise whatever LCSharedUtils managed to resolve
+        if (!resolved && ESCAppGroupIsUsable(LCSharedUtils.appGroupID)) {
+            resolved = LCSharedUtils.appGroupID;
+        }
+
+        if (resolved) {
+            ESCRememberStableAppGroup(resolved);
+            NSLog(@"[ESC] app group: resolved %@ (remembered for next launch)", resolved);
+        } else {
+            // Nothing usable: return the primary candidate anyway. SideStore then
+            // fails to open its container instead of silently creating a private
+            // empty store, which is easier to diagnose and never loses data.
+            resolved = candidates.firstObject ?: LCSharedUtils.appGroupID;
+            NSLog(@"[ESC] ERROR: no usable app group container (candidates=%@, teamIdentifier=%@, "
+                  @"LCSharedUtils.appGroupID=%@); returning %@ so SideStore fails visibly instead of "
+                  @"falling back to a private empty store",
+                  candidates, LCSharedUtils.teamIdentifier, LCSharedUtils.appGroupID, resolved);
+        }
+    });
+    return resolved;
+}
+// ESC-END
+
 @implementation NSBundle(SideStoreHooks)
 
 + (NSString*)hook_appbundleIdentifier {
@@ -74,9 +197,12 @@ static id SSSceneObserver;
     return @"com.kdt.livecontainer";
 }
 
+// ESC-BEGIN: pin the app group so the guest's Database/SideStore.sqlite (and
+// therefore the signed-in accounts) is always found at the same path.
 - (NSString*)hook_altstoreAppGroup {
-    return LCSharedUtils.appGroupID;
+    return ESCResolveStableAppGroup();
 }
+// ESC-END
 
 + (NSString*)hook_baseAltStoreAppGroupID {
     return @"group.com.SideStore.SideStore";
@@ -109,37 +235,218 @@ static id SSSceneObserver;
 // invisible to the migration lookup, migration can never start, and a stale store
 // can only be recovered by deleting it - which also wipes the signed-in accounts.
 //
+// NOTE: the on-device diagnostic below later proved that the guest bundle (and
+// its AltStore.momd) is ALREADY present in +[NSBundle allBundles] even without
+// this swizzle, so bundle visibility alone does not explain the -23. The swizzle
+// is kept as a defensive no-op; the hash comparison in the diagnostic is what
+// will settle whether the store matches any shipped model version.
+//
 // This swizzle appends the guest's own bundle to +[NSBundle allBundles]. It is a
 // no-op when the bundle is already listed, and it only takes effect in the
 // SideStore guest process (this dylib is only injected there).
 
-// One-shot diagnostic: records whether the guest bundle was already in
-// allBundles before this fix, plus allFrameworks and the store path, so the
-// "is it bundle classification or a genuinely newer database?" question can be
-// settled from the device. Written once, to <app group>/esc-sidestore-diag.txt.
-static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
-    NSURL *groupURL = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:LCSharedUtils.appGroupID];
-    if (!groupURL) return;
+// --- one-shot Core Data diagnostic ------------------------------------------
+//
+// Answers, from the device, the one question the -23 cannot answer by itself:
+// do the store's per-entity hashes match any model version shipped in the
+// guest's AltStore.momd?
+//   1. every model version in the guest's AltStore.momd: versionIdentifiers and
+//      per-entity hashes (hex)
+//   2. the on-disk store's NSStoreModelVersionIdentifiers / ...Hashes (hex)
+//   3. the result of the very lookup SideStore performs
+//      (+[NSManagedObjectModel mergedModelFromBundles:forStoreMetadata:])
+//   4. the app group state (resolved id, path, Apps/ and Database/ presence)
+// Written once, to <app group>/esc-sidestore-diag.txt. Runs off the main thread
+// and never lets an exception escape into the guest.
 
-    NSString *diagPath = [groupURL URLByAppendingPathComponent:@"esc-sidestore-diag.txt"].path;
+static NSString *ESCDataToHex(NSData *data) {
+    if (![data isKindOfClass:NSData.class]) return @"(nil)";
+    const uint8_t *bytes = data.bytes;
+    NSMutableString *hex = [NSMutableString stringWithCapacity:data.length * 2];
+    for (NSUInteger i = 0; i < data.length; i++) {
+        [hex appendFormat:@"%02x", bytes[i]];
+    }
+    return hex;
+}
+
+static void ESCAppendModelHashes(NSMutableString *out, NSManagedObjectModel *model) {
+    NSArray *ids = [model.versionIdentifiers.allObjects sortedArrayUsingSelector:@selector(compare:)];
+    [out appendFormat:@"    versionIdentifiers: %@\n", ids.count ? ids : @[]];
+    NSDictionary<NSString *, NSData *> *hashes = model.entityVersionHashesByName;
+    [out appendFormat:@"    entities (%lu):\n", (unsigned long)hashes.count];
+    for (NSString *name in [hashes.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        [out appendFormat:@"      %@ = %@\n", name, ESCDataToHex(hashes[name])];
+    }
+}
+
+// Locate the guest's compiled model directory. The guest bundle is
+// .../Frameworks/SideStoreApp.framework and its AltStore.momd sits directly
+// inside it.
+static NSString *ESCFindGuestMomdPath(NSArray<NSBundle *> *bundles) {
+    NSMutableArray<NSString *> *roots = [NSMutableArray array];
+    NSString *mainPath = NSBundle.mainBundle.bundlePath;
+    if (mainPath.length) [roots addObject:mainPath];
+    for (NSBundle *b in bundles) {
+        if ([b.bundlePath.lastPathComponent isEqualToString:@"SideStoreApp.framework"]) {
+            [roots addObject:b.bundlePath];
+        }
+    }
+    NSString *lcFrameworks = [NSUserDefaults.lcMainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/SideStoreApp.framework"];
+    if (lcFrameworks.length) [roots addObject:lcFrameworks];
+    for (NSString *root in roots) {
+        NSString *candidate = [root stringByAppendingPathComponent:@"AltStore.momd"];
+        if ([NSFileManager.defaultManager fileExistsAtPath:candidate]) return candidate;
+    }
+    return nil;
+}
+
+// Where to drop the report. Falls back to the guest's tmp dir when no app group
+// container is reachable, so the diagnostic is never silently lost.
+static NSString *ESCDiagnosticPath(void) {
+    NSString *groupID = ESCResolveStableAppGroup();
+    NSURL *groupURL = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:groupID];
+    if (groupURL) {
+        return [groupURL URLByAppendingPathComponent:@"esc-sidestore-diag.txt"].path;
+    }
+    NSString *tmp = NSTemporaryDirectory();
+    return tmp.length ? [tmp stringByAppendingPathComponent:@"esc-sidestore-diag.txt"] : nil;
+}
+
+// One-shot diagnostic. Written once, to <app group>/esc-sidestore-diag.txt.
+static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
+    NSString *diagPath = ESCDiagnosticPath();
+    if (diagPath.length == 0) {
+        NSLog(@"[ESC] diag: no writable location, skipping");
+        return;
+    }
     if ([NSFileManager.defaultManager fileExistsAtPath:diagPath]) return;
 
     NSBundle *guest = NSBundle.mainBundle;
+    NSString *groupID = ESCResolveStableAppGroup();
+    NSURL *groupURL = [NSFileManager.defaultManager containerURLForSecurityApplicationGroupIdentifier:groupID];
     NSMutableString *out = [NSMutableString string];
-    [out appendFormat:@"guest mainBundle: %@\n", guest.bundlePath];
-    [out appendFormat:@"guest in allBundles BEFORE fix: %@\n", ([originalBundles containsObject:guest] ? @"YES" : @"NO")];
 
-    [out appendFormat:@"\nallBundles (%lu) BEFORE fix:\n", (unsigned long)originalBundles.count];
-    for (NSBundle *b in originalBundles) [out appendFormat:@"  %@\n", b.bundlePath];
+    @try {
+        [out appendFormat:@"diag path: %@\n", diagPath];
+        [out appendFormat:@"guest mainBundle: %@\n", guest.bundlePath];
+        [out appendFormat:@"guest in allBundles BEFORE fix: %@\n", ([originalBundles containsObject:guest] ? @"YES" : @"NO")];
 
-    NSArray<NSBundle*> *frameworks = NSBundle.allFrameworks;
-    [out appendFormat:@"\nallFrameworks (%lu):\n", (unsigned long)frameworks.count];
-    for (NSBundle *b in frameworks) [out appendFormat:@"  %@\n", b.bundlePath];
+        [out appendFormat:@"\nallBundles (%lu) BEFORE fix:\n", (unsigned long)originalBundles.count];
+        for (NSBundle *b in originalBundles) [out appendFormat:@"  %@\n", b.bundlePath];
 
-    NSString *dbPath = [[groupURL URLByAppendingPathComponent:@"Database"] URLByAppendingPathComponent:@"SideStore.sqlite"].path;
-    [out appendFormat:@"\nstore: %@ exists=%@\n", dbPath, ([NSFileManager.defaultManager fileExistsAtPath:dbPath] ? @"YES" : @"NO")];
+        NSArray<NSBundle*> *frameworks = NSBundle.allFrameworks;
+        [out appendFormat:@"\nallFrameworks (%lu):\n", (unsigned long)frameworks.count];
+        for (NSBundle *b in frameworks) [out appendFormat:@"  %@\n", b.bundlePath];
 
-    [out writeToFile:diagPath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        // The list SideStore itself passes to mergedModelFromBundles:. Fetching
+        // it here is safe: the one-shot guard is already set when this runs, so
+        // re-entering +[NSBundle allBundles] cannot recurse.
+        NSArray<NSBundle*> *effectiveBundles = NSBundle.allBundles;
+
+        NSString *dbPath = groupURL
+            ? [[groupURL URLByAppendingPathComponent:@"Database"] URLByAppendingPathComponent:@"SideStore.sqlite"].path
+            : nil;
+        BOOL dbExists = dbPath.length ? [NSFileManager.defaultManager fileExistsAtPath:dbPath] : NO;
+        [out appendFormat:@"\nstore: %@ exists=%@\n", dbPath ?: @"(no app group container)", (dbExists ? @"YES" : @"NO")];
+
+        // --- 1. model versions shipped in the guest's AltStore.momd ----------
+        [out appendString:@"\n=== Core Data: models in guest AltStore.momd ===\n"];
+        NSString *momdPath = ESCFindGuestMomdPath(effectiveBundles);
+        if (!momdPath) {
+            [out appendString:@"momd: NOT FOUND (checked guest mainBundle, allBundles, LC Frameworks)\n"];
+        } else {
+            [out appendFormat:@"momd: %@\n", momdPath];
+            NSError *listErr = nil;
+            NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:momdPath error:&listErr];
+            if (!entries) {
+                [out appendFormat:@"momd listing FAILED: %@\n", listErr.localizedDescription ?: @"(no error)"];
+            } else {
+                NSArray<NSString *> *sorted = [entries sortedArrayUsingSelector:@selector(compare:)];
+                NSMutableArray<NSString *> *momNames = [NSMutableArray array];
+                for (NSString *name in sorted) {
+                    if ([name.pathExtension isEqualToString:@"mom"]) [momNames addObject:name];
+                }
+                [out appendFormat:@"model versions (%lu of %lu entries):\n", (unsigned long)momNames.count, (unsigned long)sorted.count];
+                for (NSString *name in momNames) {
+                    NSURL *momURL = [NSURL fileURLWithPath:[momdPath stringByAppendingPathComponent:name]];
+                    NSManagedObjectModel *model = [[NSManagedObjectModel alloc] initWithContentsOfURL:momURL];
+                    [out appendFormat:@"  %@:\n", name];
+                    if (!model) {
+                        [out appendString:@"    LOAD FAILED (initWithContentsOfURL: returned nil)\n"];
+                        continue;
+                    }
+                    ESCAppendModelHashes(out, model);
+                }
+            }
+        }
+
+        // --- 2. on-disk store metadata --------------------------------------
+        [out appendString:@"\n=== Core Data: on-disk store metadata ===\n"];
+        NSDictionary *storeMeta = nil;
+        NSError *metaErr = nil;
+        if (dbExists) {
+            storeMeta = [NSPersistentStoreCoordinator metadataForPersistentStoreOfType:NSSQLiteStoreType
+                                                                                  URL:[NSURL fileURLWithPath:dbPath]
+                                                                              options:nil
+                                                                                error:&metaErr];
+        }
+        if (storeMeta) {
+            [out appendString:@"metadata: OK\n"];
+            id ids = storeMeta[NSStoreModelVersionIdentifiers];
+            [out appendFormat:@"  NSStoreModelVersionIdentifiers: %@\n", ids ?: @"(none)"];
+            NSDictionary<NSString *, NSData *> *storeHashes = storeMeta[NSStoreModelVersionHashes];
+            [out appendFormat:@"  NSStoreModelVersionHashes entities (%lu):\n", (unsigned long)storeHashes.count];
+            for (NSString *name in [storeHashes.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+                [out appendFormat:@"    %@ = %@\n", name, ESCDataToHex(storeHashes[name])];
+            }
+        } else {
+            [out appendFormat:@"metadata: UNAVAILABLE (store exists=%@, error=%@)\n",
+                              (dbExists ? @"YES" : @"NO"), metaErr.localizedDescription ?: @"(no error)"];
+        }
+
+        // --- 3. the lookup SideStore performs --------------------------------
+        [out appendString:@"\n=== Core Data: mergedModelFromBundles:forStoreMetadata: ===\n"];
+        if (storeMeta) {
+            NSManagedObjectModel *merged = [NSManagedObjectModel mergedModelFromBundles:effectiveBundles
+                                                                       forStoreMetadata:storeMeta];
+            if (merged) {
+                NSArray *mids = [merged.versionIdentifiers.allObjects sortedArrayUsingSelector:@selector(compare:)];
+                [out appendFormat:@"result: NON-NIL, entities=%lu, versionIdentifiers=%@\n",
+                                  (unsigned long)merged.entityVersionHashesByName.count, mids.count ? mids : @[]];
+            } else {
+                [out appendString:@"result: nil  <-- this is what makes SideStore throw Code=-23\n"];
+            }
+        } else {
+            [out appendString:@"result: SKIPPED (no store metadata to match against)\n"];
+        }
+
+        // --- 4. app group state ---------------------------------------------
+        [out appendString:@"\n=== app group ===\n"];
+        [out appendFormat:@"LCSharedUtils.appGroupID: %@\n", LCSharedUtils.appGroupID];
+        [out appendFormat:@"LCSharedUtils.teamIdentifier: %@\n", LCSharedUtils.teamIdentifier ?: @"(nil)"];
+        [out appendFormat:@"ESC resolved app group: %@\n", groupID];
+        [out appendFormat:@"candidates: %@\n", ESCCandidateAppGroups()];
+        [out appendFormat:@"LCSharedUtils.appGroupPath: %@\n", LCSharedUtils.appGroupPath.path ?: @"(nil)"];
+        if (groupURL) {
+            [out appendFormat:@"<group>/Apps exists: %@\n",
+                              ([NSFileManager.defaultManager fileExistsAtPath:[groupURL URLByAppendingPathComponent:@"Apps"].path] ? @"YES" : @"NO")];
+            [out appendFormat:@"<group>/Database exists: %@\n",
+                              ([NSFileManager.defaultManager fileExistsAtPath:[groupURL URLByAppendingPathComponent:@"Database"].path] ? @"YES" : @"NO")];
+        } else {
+            [out appendString:@"<group> containerURL: nil (cannot check Apps/ or Database/)\n"];
+        }
+    } @catch (NSException *e) {
+        [out appendFormat:@"\n!!! diagnostic aborted: %@ (reason: %@)\n", e.name, e.reason];
+        NSLog(@"[ESC] diag aborted: %@", e);
+    }
+
+    // Write whatever was collected; never throw into the guest.
+    @try {
+        [out writeToFile:diagPath atomically:YES encoding:NSUTF8StringEncoding error:NULL];
+        NSLog(@"[ESC] diag written to %@", diagPath);
+    } @catch (NSException *e) {
+        NSLog(@"[ESC] diag write failed: %@", e);
+    }
 }
 
 + (NSArray<NSBundle*>*)hook_allBundles {
@@ -147,11 +454,15 @@ static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
     NSArray<NSBundle*> *bundles = [NSBundle hook_allBundles];
 
     // set the flag before doing any work: the diagnostic itself touches NSBundle
-    // APIs, so re-entrancy must not be able to re-enter this block.
-    static BOOL escDiagnosticWritten = NO;
-    if (!escDiagnosticWritten) {
-        escDiagnosticWritten = YES;
-        ESCWriteAllBundlesDiagnostic(bundles);
+    // APIs, so re-entrancy must not be able to re-enter this block. The work
+    // itself runs off the main thread, since it loads models and reads SQLite.
+    static BOOL escDiagnosticScheduled = NO;
+    if (!escDiagnosticScheduled) {
+        escDiagnosticScheduled = YES;
+        NSArray<NSBundle*> *beforeFix = bundles;
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            ESCWriteAllBundlesDiagnostic(beforeFix);
+        });
     }
 
     NSBundle *guest = NSBundle.mainBundle;
