@@ -284,15 +284,25 @@ static void ESCAppendModelHashes(NSMutableString *out, NSManagedObjectModel *mod
 // inside it.
 static NSString *ESCFindGuestMomdPath(NSArray<NSBundle *> *bundles) {
     NSMutableArray<NSString *> *roots = [NSMutableArray array];
+
+    // LiveContainer's own bundle path is tried first. It is the only root that
+    // does not depend on enumerating NSBundle, so it stays reliable even when
+    // this runs from inside a NSBundle accessor and a re-entrant lookup would be
+    // unsafe. In the two-in-one build the guest sits at
+    // <LiveContainer.app>/Frameworks/SideStoreApp.framework.
+    NSString *lcFrameworks = [NSUserDefaults.lcMainBundle.bundlePath
+                                 stringByAppendingPathComponent:@"Frameworks/SideStoreApp.framework"];
+    if (lcFrameworks.length) [roots addObject:lcFrameworks];
+
     NSString *mainPath = NSBundle.mainBundle.bundlePath;
     if (mainPath.length) [roots addObject:mainPath];
+
     for (NSBundle *b in bundles) {
         if ([b.bundlePath.lastPathComponent isEqualToString:@"SideStoreApp.framework"]) {
             [roots addObject:b.bundlePath];
         }
     }
-    NSString *lcFrameworks = [NSUserDefaults.lcMainBundle.bundlePath stringByAppendingPathComponent:@"Frameworks/SideStoreApp.framework"];
-    if (lcFrameworks.length) [roots addObject:lcFrameworks];
+
     for (NSString *root in roots) {
         NSString *candidate = [root stringByAppendingPathComponent:@"AltStore.momd"];
         if ([NSFileManager.defaultManager fileExistsAtPath:candidate]) return candidate;
@@ -539,7 +549,13 @@ static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadat
     NSData *storeInstalledAppHash = storeHashes[ESCLegacyInstalledAppEntity];
     if (storeInstalledAppHash.length == 0) return nil;
 
-    NSString *momdPath = ESCFindGuestMomdPath(NSBundle.allBundles);
+    // Resolve the guest's momd directly from LiveContainer's own bundle path.
+    // This hook runs inside +[NSManagedObjectModel mergedModelFromBundles:
+    // forStoreMetadata:], which is called with NSBundle.allBundles; going back
+    // through that accessor here would re-enter hook_allBundles. The lcMainBundle
+    // path is the one root ESCFindGuestMomdPath already trusts, so pass an empty
+    // bundle list and let it try mainBundle plus that path.
+    NSString *momdPath = ESCFindGuestMomdPath(@[]);
     if (momdPath.length == 0) return nil;
 
     NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:momdPath error:NULL];
