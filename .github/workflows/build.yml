@@ -64,7 +64,13 @@ jobs:
           # (the raw output only comes back through the pipe when it succeeds),
           # which left failed runs with nothing but
           # "The following build commands failed:" and no actual error line.
-          set -o pipefail
+          #
+          # The runner invokes this script with `bash -e`, so a failing
+          # xcodebuild would abort the step before `status=$?` ever ran - every
+          # line of the reporting below was unreachable and the raw log was
+          # never printed. Wrap the build in `set +e`/`set -e` so the exit code
+          # is captured first.
+          set +e
           xcodebuild archive \
             -archivePath "$archive_path" \
             -scheme "$scheme" \
@@ -72,13 +78,14 @@ jobs:
             -sdk iphoneos -arch arm64 -configuration Release \
             > build_raw.log 2>&1
           status=$?
+          set -e
           if [ $status -ne 0 ]; then
             echo "::group::Raw compiler diagnostics (errors and warnings)"
             # Keep the diagnostics, drop the thousands of ▸ progress lines.
             grep -nE "error:|warning:|note:|^\s*\^|\*\* ARCHIVE FAILED|The following build commands" build_raw.log || true
             echo "::endgroup::"
             echo "::group::Last 200 lines of the raw log"
-            tail -n 200 build_raw.log
+            tail -n 200 build_raw.log || true
             echo "::endgroup::"
           else
             # Success: keep the familiar pretty output.
