@@ -646,6 +646,15 @@ static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadat
     return [bundles arrayByAddingObject:guest];
 }
 
+// Signature of +[NSManagedObjectModel mergedModelFromBundles:forStoreMetadata:].
+// Held as an IMP so the hook can reach the original implementation without a
+// compiler-visible declaration of the method.
+typedef NSManagedObjectModel *(*ESCMergedModelFn)(Class,
+                                                  SEL,
+                                                  NSArray<NSBundle *> *,
+                                                  NSDictionary<NSString *, id> *);
+static ESCMergedModelFn ESCOriginalMergedModel = NULL;
+
 // ESC-BEGIN: last-resort rescue for the migration lookup.
 //
 // This is the call PersistentContainer makes when the on-disk store does not
@@ -658,9 +667,20 @@ static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadat
 // still rejected exactly as before.
 + (NSManagedObjectModel *)hook_mergedModelFromBundles:(NSArray<NSBundle *> *)bundles
                                      forStoreMetadata:(NSDictionary<NSString *, id> *)metadata {
-    // exchange-style swizzle: reaches the original implementation
-    NSManagedObjectModel *merged = [NSManagedObjectModel hook_mergedModelFromBundles:bundles
-                                                                    forStoreMetadata:metadata];
+    // The exchange-style trick used elsewhere in this file ([NSBundle
+    // hook_allBundles]) needs a compiler-visible declaration of the hooked
+    // method on that class. NSManagedObjectModel has no declaration of
+    // +mergedModelFromBundles:forStoreMetadata: in any header we compile
+    // against, so that form fails with "no known class method for selector".
+    // Call through the captured IMP instead: same message send, no compile-time
+    // signature lookup.
+    if (!ESCOriginalMergedModel) {
+        return nil;
+    }
+    NSManagedObjectModel *merged = ESCOriginalMergedModel(NSManagedObjectModel.class,
+                                                          @selector(mergedModelFromBundles:forStoreMetadata:),
+                                                          bundles,
+                                                          metadata);
 
     if (merged) {
         return merged;
@@ -791,9 +811,19 @@ void installSideStoreHooks(void) {
 
     // ESC-BEGIN: accept the legacy InstalledApp model when the migration lookup
     // finds no match, so stores written before upstream 15d8974e stay readable.
-    swizzleClassMethod(NSManagedObjectModel.class,
-                       @selector(mergedModelFromBundles:forStoreMetadata:),
-                       @selector(hook_mergedModelFromBundles:forStoreMetadata:));
+    //
+    // The original IMP is captured before the exchange, because after it
+    // class_getClassMethod would hand back the hook itself.
+    {
+        Method originalMergedModel = class_getClassMethod(NSManagedObjectModel.class,
+                                                          @selector(mergedModelFromBundles:forStoreMetadata:));
+        if (originalMergedModel) {
+            ESCOriginalMergedModel = (ESCMergedModelFn)method_getImplementation(originalMergedModel);
+        }
+        swizzleClassMethod(NSManagedObjectModel.class,
+                           @selector(mergedModelFromBundles:forStoreMetadata:),
+                           @selector(hook_mergedModelFromBundles:forStoreMetadata:));
+    }
     // ESC-END
     
     // replace altStoreSourceURL
