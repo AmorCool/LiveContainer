@@ -58,7 +58,33 @@ jobs:
           scheme: ${{ steps.scheme.outputs.scheme }}
           filetype_parameter: ${{ steps.filetype_parameter.outputs.filetype_parameter }}
           file_to_build: ${{ steps.file_to_build.outputs.file_to_build }}
-        run: xcodebuild archive -archivePath "$archive_path" -scheme "$scheme" -"$filetype_parameter" "$file_to_build" -sdk iphoneos -arch arm64 -configuration Release | xcpretty && exit ${PIPESTATUS[0]}
+        run: |
+          # Build to a log file instead of piping straight into xcpretty, so a
+          # failure can be diagnosed. xcpretty swallows compiler diagnostics
+          # (the raw output only comes back through the pipe when it succeeds),
+          # which left failed runs with nothing but
+          # "The following build commands failed:" and no actual error line.
+          set -o pipefail
+          xcodebuild archive \
+            -archivePath "$archive_path" \
+            -scheme "$scheme" \
+            -"$filetype_parameter" "$file_to_build" \
+            -sdk iphoneos -arch arm64 -configuration Release \
+            > build_raw.log 2>&1
+          status=$?
+          if [ $status -ne 0 ]; then
+            echo "::group::Raw compiler diagnostics (errors and warnings)"
+            # Keep the diagnostics, drop the thousands of ▸ progress lines.
+            grep -nE "error:|warning:|note:|^\s*\^|\*\* ARCHIVE FAILED|The following build commands" build_raw.log || true
+            echo "::endgroup::"
+            echo "::group::Last 200 lines of the raw log"
+            tail -n 200 build_raw.log
+            echo "::endgroup::"
+          else
+            # Success: keep the familiar pretty output.
+            xcpretty < build_raw.log || true
+          fi
+          exit $status
       - name: Tar Build Artifact
         run: tar -cvf "$archive_path.xcarchive.tar" "$archive_path.xcarchive"
       - name: Upload a Build Artifact

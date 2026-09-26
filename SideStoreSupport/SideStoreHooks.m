@@ -392,9 +392,13 @@ static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
         }
         if (storeMeta) {
             [out appendString:@"metadata: OK\n"];
-            id ids = storeMeta[NSStoreModelVersionIdentifiers];
+            id ids = storeMeta[NSStoreModelVersionIdentifiersKey];
             [out appendFormat:@"  NSStoreModelVersionIdentifiers: %@\n", ids ?: @"(none)"];
-            NSDictionary<NSString *, NSData *> *storeHashes = storeMeta[NSStoreModelVersionHashes];
+            // The value is an NSDictionary of entity name -> NSData hash. Its
+            // static type in the metadata dict is `id`, so cast explicitly.
+            NSDictionary<NSString *, NSData *> *storeHashes =
+                (NSDictionary<NSString *, NSData *> *)storeMeta[NSStoreModelVersionHashesKey];
+            if (![storeHashes isKindOfClass:NSDictionary.class]) storeHashes = nil;
             [out appendFormat:@"  NSStoreModelVersionHashes entities (%lu):\n", (unsigned long)storeHashes.count];
             for (NSString *name in [storeHashes.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
                 [out appendFormat:@"    %@ = %@\n", name, ESCDataToHex(storeHashes[name])];
