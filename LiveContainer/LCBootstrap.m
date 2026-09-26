@@ -14,6 +14,12 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <stdlib.h>
+// ESC: errno / strerror for the guest tmp symlink diagnostics below. symlink(2)
+// itself already resolves through unistd.h indirectly, but errno.h and string.h
+// are not pulled in by anything else in this file.
+#include <errno.h>
+#include <string.h>
+#include <unistd.h>
 #include "../litehook/src/litehook.h"
 #import "Tweaks/Tweaks.h"
 #include <mach-o/ldsyms.h>
@@ -458,9 +464,36 @@ static NSString* invokeAppMain(NSString *selectedApp, NSString *selectedContaine
     }
     
     
+    // ESC-BEGIN: the old `remove()` could not delete a non-empty directory.
+    //
+    // `remove(3)` maps to rmdir for directories and unlink for everything else, so
+    // it fails with ENOTEMPTY as soon as the guest has put anything inside tmp/.
+    // Upstream ignored both return values, which turned the failure into two
+    // separate problems:
+    //   1. the stale real directory stayed behind (it is what shows up as bulk in
+    //      the container root) and is re-enumerated on every launch;
+    //   2. symlink() then failed too, with EEXIST, so the guest kept a real tmp/
+    //      instead of the TMPDIR link -- a different environment from a fresh
+    //      container, which is exactly the state the symlink exists to avoid.
+    //
+    // Remove by type instead, and delete recursively so a populated tmp/ cannot
+    // block the link. NSFileManager is used deliberately: on a symlink,
+    // removeItemAtPath: unlinks the link itself and does not descend into the
+    // directory it names. Hand-rolled recursion over contentsOfDirectoryAtPath:
+    // would follow the link and delete inside TMPDIR, i.e. wipe the real
+    // per-process temporary directory.
+    NSFileManager *escFM = NSFileManager.defaultManager;
     NSString *newTmpPath = [newHomePath stringByAppendingPathComponent:@"tmp"];
-    remove(newTmpPath.UTF8String);
-    symlink(getenv("TMPDIR"), newTmpPath.UTF8String);
+    if([escFM fileExistsAtPath:newTmpPath]) {
+        NSError *escRemoveError = nil;
+        if(![escFM removeItemAtPath:newTmpPath error:&escRemoveError]) {
+            NSLog(@"[ESC] failed to clear guest tmp path %@: %@", newTmpPath, escRemoveError.localizedDescription);
+        }
+    }
+    if(symlink(getenv("TMPDIR"), newTmpPath.UTF8String) != 0) {
+        NSLog(@"[ESC] failed to link guest tmp path %@ to TMPDIR: %s", newTmpPath, strerror(errno));
+    }
+    // ESC-END
     
     if([guestAppInfo[@"doSymlinkInbox"] boolValue]) {
         NSString* inboxSymlinkPath = [NSString stringWithFormat:@"%s/%@-Inbox", getenv("TMPDIR"), [appBundle bundleIdentifier]];
