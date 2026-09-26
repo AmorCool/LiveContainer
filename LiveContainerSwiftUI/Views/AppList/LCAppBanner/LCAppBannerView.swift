@@ -26,9 +26,7 @@ final class LCAppBannerRootView: UIView {
     private let sharedBadge = LCAppBannerBadgeView(symbolName: "arrowshape.turn.up.left.fill")
     private let jitBadge = LCAppBannerBadgeView(symbolName: "bolt.fill")
     private let lockBadge = LCAppBannerBadgeView(symbolName: "lock.fill")
-#if is32BitSupported
     private let bit32Badge = LCAppBannerBadgeView(text: "32")
-#endif
     private let nameSpacer = UIView()
     private let nameStack = UIStackView()
     private let detailStack = UIStackView()
@@ -94,9 +92,7 @@ final class LCAppBannerRootView: UIView {
         nameStack.addArrangedSubview(nameLabel)
         nameStack.addArrangedSubview(sharedBadge)
         nameStack.addArrangedSubview(jitBadge)
-#if is32BitSupported
         nameStack.addArrangedSubview(bit32Badge)
-#endif
         nameStack.addArrangedSubview(lockBadge)
         nameStack.addArrangedSubview(nameSpacer)
 
@@ -242,14 +238,17 @@ final class LCAppBannerRootView: UIView {
 
         sharedBadge.isHidden = isGrid || !model.uiIsShared
         sharedBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
-        jitBadge.isHidden = isGrid || !model.uiIsJITNeeded
+        // Upstream hides the JIT badge for 32-bit apps (a 32-bit guest cannot use
+        // JIT); the grid layout hides every badge, so both conditions are kept.
+        jitBadge.isHidden = isGrid || !model.uiIsJITNeeded || model.uiIs32bit
         jitBadge.backgroundColor = UIColor(named: "JITBadgeColor") ?? .systemPurple
         lockBadge.isHidden = isGrid || !model.uiIsLocked || model.uiIsHidden
         lockBadge.backgroundColor = UIColor(named: "BadgeColor") ?? .systemOrange
-#if is32BitSupported
+        // Upstream dropped the `#if is32BitSupported` compile-time gate in favour of
+        // the runtime `model.uiIs32bit` check, so the badge now exists on every
+        // build and is hidden per app. The grid layout hides it as well.
         bit32Badge.isHidden = isGrid || !model.uiIs32bit
         bit32Badge.backgroundColor = UIColor(named: "32BitBadgeColor") ?? .systemBlue
-#endif
 
         visualBackgroundView.backgroundColor = dynamicColors
             ? mainColor.withAlphaComponent(0.5)

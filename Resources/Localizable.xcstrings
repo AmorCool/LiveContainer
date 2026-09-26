@@ -8700,6 +8700,17 @@
         }
       }
     },
+    "lc.appSettings.selected32BitEmulator" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "32-bit emulator"
+          }
+        }
+      }
+    },
     "lc.appSettings.selectExternalStorage" : {
       "extractionState" : "stale",
       "localizations" : {
@@ -27358,6 +27369,17 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "終結後自動重啟"
+          }
+        }
+      }
+    },
+    "lc.settings.selected32BitEmulator" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Default 32-bit emulator"
           }
         }
       }

@@ -696,11 +696,21 @@ void* jitless_hook_mmap(void *addr, size_t len, int prot, int flags, int fd, off
     char filePath[PATH_MAX];
     if (fcntl(fd, F_GETPATH, filePath) != 0) return map;
     char newTmpPath[PATH_MAX];
-    // ESC-BEGIN: random temp name. The old name embedded the mmap address, which
-    // leaked an ASLR-derived code address through the file name.
+    // ESC-BEGIN: temp name carries no address.
+    //
+    // Upstream used "%p.dylib" (the raw mmap address) and later changed it to
+    // ".fd%d.dylib". Both leak host state through a file name that, for the
+    // duration of the mmap, is visible in the guest's own Documents directory:
+    // the address form is a textbook ASLR leak, and the fd form exposes a
+    // process-wide descriptor number that the guest can use as a fingerprint.
+    // Keep upstream's idea of binding the name to the fd (so two concurrent
+    // mappings never collide) but mix in random bits, so the name is unique and
+    // still carries nothing an observer could correlate.
     uint64_t randomName = 0;
     arc4random_buf(&randomName, sizeof(randomName));
-    snprintf(newTmpPath, sizeof(newTmpPath), "%s/Documents/%016llx.dylib", getenv("LP_HOME_PATH"), (unsigned long long)randomName);
+    snprintf(newTmpPath, sizeof(newTmpPath), "%s/Documents/.%08x%08x.dylib",
+             getenv("LP_HOME_PATH"),
+             (unsigned)(fd & 0xffff), (unsigned)(randomName & 0xffffffff));
     // ESC-END
     rename(filePath, newTmpPath);
     map = __mmap(addr, len, prot, flags, fd, offset);
@@ -742,41 +752,32 @@ void bypass_seg_count_check(void (^block)(void)) {
     }
 }
 
-
-static void* hasInternalContent = 0;
-
-bool hook_os_variant_has_internal_content(const char* subsystem) {
-     return true;
-}
-
 void bypass_os_variant_has_internal_content(void (^block)(void)) {
-    hasInternalContent = dlsym(RTLD_DEFAULT, "os_variant_has_internal_content");
-    arm_debug_state64_t origHasInternalContentDebugState = {0};
-    exception_mask_t hasInternalContentMask = EXC_MASK_BREAKPOINT;
-    mach_msg_type_number_t hasInternalContentMasksCnt = 1;
-    exception_handler_t hasInternalContentHandler = excPort;
-    exception_behavior_t hasInternalContentBehavior = EXCEPTION_STATE | MACH_EXCEPTION_CODES;
-    thread_state_flavor_t hasInternalContentFlavor = ARM_THREAD_STATE64;
-    mach_port_t thread = mach_thread_self();
-    if(hasInternalContent) {
-        ensureBreakpointExceptionHandler();
-        hasInternalContentHandler = excPort;
-        thread_get_state(thread, ARM_DEBUG_STATE64, (thread_state_t)&origHasInternalContentDebugState, &(mach_msg_type_number_t){ARM_DEBUG_STATE64_COUNT});
-        thread_swap_exception_ports(thread, hasInternalContentMask, hasInternalContentHandler, hasInternalContentBehavior, hasInternalContentFlavor, &hasInternalContentMask, &hasInternalContentMasksCnt, &hasInternalContentHandler, &hasInternalContentBehavior, &hasInternalContentFlavor);
-        assert(hasInternalContentMasksCnt == 1);
-
-        arm_debug_state64_t hookDebugState = origHasInternalContentDebugState;
-        hookDebugState.__bvr[1] = (uint64_t)hasInternalContent;
-        hookDebugState.__bcr[1] = 0x1e5;
-        thread_set_state(thread, ARM_DEBUG_STATE64, (thread_state_t)&hookDebugState, ARM_DEBUG_STATE64_COUNT);
+#if !TARGET_OS_SIMULATOR
+    const char *libsystem_darwinPath = "/usr/lib/system/libsystem_darwin.dylib";
+    mach_header_u *libsystem_darwinHeader = LCGetLoadedImageHeader(0, libsystem_darwinPath);
+    NSString *internalRelTypeName = @"_internal_release_type";
+    uint32_t *internalRelTypePtr = getCachedSymbol(internalRelTypeName, libsystem_darwinHeader);
+    if (!internalRelTypePtr) {
+        internalRelTypePtr = litehook_find_dsc_symbol(libsystem_darwinPath, internalRelTypeName.UTF8String);
+        uint64_t offset = (uint64_t)((void*)internalRelTypePtr - (void*)libsystem_darwinHeader);
+        saveCachedSymbol(internalRelTypeName, libsystem_darwinHeader, offset);
     }
-
+    
+    uint32_t orig = *internalRelTypePtr;
+    *internalRelTypePtr = 3;
+#endif
+    
+    // Bypass iOS 16's +[SpringBoardUI load] crash
+    Class xctest = objc_allocateClassPair(NSObject.class, "XCTestConfiguration", 0);
+    if (xctest) objc_registerClassPair(xctest);
+    
     block();
     
-    if(hasInternalContent) {
-        thread_set_state(thread, ARM_DEBUG_STATE64, (thread_state_t)&origHasInternalContentDebugState, ARM_DEBUG_STATE64_COUNT);
-        thread_swap_exception_ports(thread, hasInternalContentMask, hasInternalContentHandler, hasInternalContentBehavior, hasInternalContentFlavor, &hasInternalContentMask, &hasInternalContentMasksCnt, &hasInternalContentHandler, &hasInternalContentBehavior, &hasInternalContentFlavor);
-    }
+    if (xctest) objc_disposeClassPair(xctest);
+#if !TARGET_OS_SIMULATOR
+    *internalRelTypePtr = orig;
+#endif
 }
 
 kern_return_t catch_mach_exception_raise_state( mach_port_t exception_port, exception_type_t exception, const mach_exception_data_t code, mach_msg_type_number_t codeCnt, int *flavor, const thread_state_t old_state, mach_msg_type_number_t old_stateCnt, thread_state_t new_state, mach_msg_type_number_t *new_stateCnt) {
@@ -798,11 +799,6 @@ kern_return_t catch_mach_exception_raise_state( mach_port_t exception_port, exce
         // not sure if this offset will change again
         *(uint8_t *)(((void *)old->__x[8]) + 0xa0) = 0;
         arm_thread_state64_set_pc_presigned_fptr(*new, arm_thread_state64_get_lr_fptr(*old) ?: (void *)arm_thread_state64_get_lr(*old));
-        return KERN_SUCCESS;
-    } else if (pc == (uint64_t)hasInternalContent) {
-        *new = *old;
-        *new_stateCnt = old_stateCnt;
-        arm_thread_state64_set_pc_fptr(*new, hook_os_variant_has_internal_content);
         return KERN_SUCCESS;
     }
     // ESC-BEGIN: do not log the breakpoint address (it is a raw code pointer)
