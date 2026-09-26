@@ -453,6 +453,159 @@ static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
     }
 }
 
+// ESC-BEGIN: legacy InstalledApp model compatibility.
+//
+// Root cause of SideStore's Code=-23 on stores created by older builds.
+//
+// Upstream commit 15d8974e (2026-08-28) changed one line of the *AltStore 17_6*
+// model, without renaming the version:
+//
+//     <uniquenessConstraints>
+//         <uniquenessConstraint>
+//   -         <constraint value="bundleIdentifier"/>
+//   +         <constraint value="resignedBundleIdentifier"/>
+//
+// A uniqueness constraint is part of an entity's version hash, so the same
+// version identifier now yields a different hash. Core Data matches models by
+// hash, never by version string, so a store written before that commit carries
+// NSStoreModelVersionHashes["InstalledApp"] = ea9647d8... while every model in
+// the shipped AltStore.momd reports f9517be2... (17_6), e65b04c2... (17_7), etc.
+// Nothing in the bundle matches, mergedModelFromBundles:forStoreMetadata:
+// returns nil, and PersistentContainer throws "Unable to find any managed object
+// models." (Code=-23). The store itself is perfectly readable.
+//
+// Note this is NOT a downgrade and has nothing to do with 17_6 vs 17_7: 17_6
+// alone no longer matches its own older self.
+//
+// The fix is the same one Core Data would apply if the version had been bumped
+// correctly: an implicit lightweight migration from the legacy model to the
+// current one. uniquenessConstraints only affect validation; they add and remove
+// no columns, so the two models describe byte-identical table layouts. The
+// migration is therefore an identity transform for the data.
+//
+// The legacy model is synthesised at runtime by loading a shipped .mom and
+// swapping its InstalledApp uniqueness constraint back to the pre-15d8974e
+// value. No file on disk is touched, and the store's Z_METADATA is left exactly
+// as it is.
+
+static NSString * const ESCLegacyInstalledAppEntity = @"InstalledApp";
+static NSString * const ESCLegacyConstraintName = @"resignedBundleIdentifier";
+static NSString * const ESCOriginalConstraintName = @"bundleIdentifier";
+
+// Cached: this runs on the migration path, which may be retried.
+static NSMutableDictionary<NSString *, NSManagedObjectModel *> *ESCLegacyModelCache(void) {
+    static NSMutableDictionary<NSString *, NSManagedObjectModel *> *cache = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        cache = [NSMutableDictionary dictionary];
+    });
+    return cache;
+}
+
+// Rebuild an entity with its uniqueness constraint restored to the pre-15d8974e
+// value. Returns the receiver when there is nothing to change.
+static NSEntityDescription *ESCEntityWithLegacyConstraint(NSEntityDescription *entity) {
+    NSArray<NSArray<NSString *> *> *constraints = entity.uniquenessConstraints;
+    if (constraints.count == 0) return entity;
+
+    BOOL changed = NO;
+    NSMutableArray<NSArray<NSString *> *> *rebuilt = [NSMutableArray arrayWithCapacity:constraints.count];
+    for (NSArray<NSString *> *group in constraints) {
+        NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:group.count];
+        for (NSString *name in group) {
+            if ([name isEqualToString:ESCLegacyConstraintName]) {
+                [names addObject:ESCOriginalConstraintName];
+                changed = YES;
+            } else {
+                [names addObject:name];
+            }
+        }
+        [rebuilt addObject:names];
+    }
+    if (!changed) return entity;
+    entity.uniquenessConstraints = rebuilt;
+    return entity;
+}
+
+// Load every .mom in the guest's AltStore.momd and return the first one whose
+// InstalledApp entity becomes hash-compatible with `storeMetadata` once its
+// uniqueness constraint is restored.
+static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadata) {
+    if (![storeMetadata isKindOfClass:NSDictionary.class]) return nil;
+
+    NSDictionary<NSString *, NSData *> *storeHashes =
+        (NSDictionary<NSString *, NSData *> *)storeMetadata[NSStoreModelVersionHashesKey];
+    if (![storeHashes isKindOfClass:NSDictionary.class]) return nil;
+    NSData *storeInstalledAppHash = storeHashes[ESCLegacyInstalledAppEntity];
+    if (storeInstalledAppHash.length == 0) return nil;
+
+    NSString *momdPath = ESCFindGuestMomdPath(NSBundle.allBundles);
+    if (momdPath.length == 0) return nil;
+
+    NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:momdPath error:NULL];
+    if (entries.count == 0) return nil;
+
+    for (NSString *name in [entries sortedArrayUsingSelector:@selector(compare:)]) {
+        if (![name.pathExtension isEqualToString:@"mom"]) continue;
+
+        NSString *key = [momdPath stringByAppendingPathComponent:name];
+        NSManagedObjectModel *legacy = ESCLegacyModelCache()[key];
+        if (!legacy) {
+            NSManagedObjectModel *loaded =
+                [[NSManagedObjectModel alloc] initWithContentsOfURL:[NSURL fileURLWithPath:key]];
+            if (!loaded) continue;
+
+            NSMutableArray<NSEntityDescription *> *entities =
+                [NSMutableArray arrayWithCapacity:loaded.entities.count];
+            for (NSEntityDescription *entity in loaded.entities) {
+                if ([entity.name isEqualToString:ESCLegacyInstalledAppEntity]) {
+                    [entities addObject:ESCEntityWithLegacyConstraint(entity)];
+                } else {
+                    [entities addObject:entity];
+                }
+            }
+            loaded.entities = entities;
+            legacy = loaded;
+            ESCLegacyModelCache()[key] = legacy;
+        }
+
+        NSData *adjusted = legacy.entityVersionHashesByName[ESCLegacyInstalledAppEntity];
+        if (adjusted.length && [adjusted isEqualToData:storeInstalledAppHash]) {
+            NSLog(@"[ESC] legacy model match: %@ (InstalledApp hash %@)", name, ESCDataToHex(adjusted));
+            return legacy;
+        }
+    }
+    return nil;
+}
+
+// ESC-END
+
+// ESC-BEGIN: make the guest bundle visible to Core Data's migration lookup.
+//
+// SideStore's PersistentContainer, when the on-disk store is incompatible with
+// the current model, looks for the older model with
+//     +[NSManagedObjectModel mergedModelFromBundles:forStoreMetadata:]
+//     (Swift: NSManagedObjectModel.mergedModel(from: Bundle.allBundles, forStoreMetadata:))
+// and throws Code=-23 "Unable to find any managed object models." when it returns nil.
+//
+// Inside LiveContainer the guest app is not a real app bundle: build_github.sh
+// renames SideStore.app to Frameworks/SideStoreApp.framework and dylibifies its
+// executable to MH_DYLIB, so CFBundle classifies it as a framework and Apple
+// documents +[NSBundle allBundles] as excluding frameworks. The guest's own
+// AltStore.momd (which ships every historical model version) therefore becomes
+// invisible to the migration lookup, migration can never start, and a stale store
+// can only be recovered by deleting it - which also wipes the signed-in accounts.
+//
+// NOTE: the on-device diagnostic below later proved that the guest bundle (and
+// its AltStore.momd) is ALREADY present in +[NSBundle allBundles] even without
+// this swizzle, so bundle visibility alone does not explain the -23. The swizzle
+// is kept as a defensive no-op; the hash comparison in the diagnostic is what
+// will settle whether the store matches any shipped model version.
+//
+// This swizzle appends the guest's own bundle to +[NSBundle allBundles]. It is a
+// no-op when the bundle is already listed, and it only takes effect in the
+// SideStore guest process (this dylib is only injected there).
+
 + (NSArray<NSBundle*>*)hook_allBundles {
     // exchange-style swizzle: this call reaches the original +[NSBundle allBundles]
     NSArray<NSBundle*> *bundles = [NSBundle hook_allBundles];
@@ -475,6 +628,39 @@ static void ESCWriteAllBundlesDiagnostic(NSArray<NSBundle*> *originalBundles) {
         if ([b.bundlePath isEqualToString:guest.bundlePath]) return bundles;
     }
     return [bundles arrayByAddingObject:guest];
+}
+
+// ESC-BEGIN: last-resort rescue for the migration lookup.
+//
+// This is the call PersistentContainer makes when the on-disk store does not
+// match the current model. Its nil return is what becomes Code=-23. When the
+// normal lookup finds nothing, retry against the legacy InstalledApp model
+// (see the block above) so stores written before upstream 15d8974e can still
+// migrate instead of being reported as unreadable.
+//
+// Only a genuine hash match is accepted, so a store from an unrelated schema is
+// still rejected exactly as before.
++ (NSManagedObjectModel *)hook_mergedModelFromBundles:(NSArray<NSBundle *> *)bundles
+                                     forStoreMetadata:(NSDictionary<NSString *, id> *)metadata {
+    // exchange-style swizzle: reaches the original implementation
+    NSManagedObjectModel *merged = [NSManagedObjectModel hook_mergedModelFromBundles:bundles
+                                                                    forStoreMetadata:metadata];
+
+    if (merged) {
+        return merged;
+    }
+
+    @try {
+        NSManagedObjectModel *legacy = ESCLegacyCompatibleModel(metadata);
+        if (legacy) {
+            NSLog(@"[ESC] mergedModelFromBundles: returned nil; using legacy InstalledApp model");
+            return legacy;
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[ESC] legacy model lookup threw: %@ (reason: %@)", e.name, e.reason);
+    }
+
+    return nil;
 }
 // ESC-END
 
@@ -585,6 +771,13 @@ void installSideStoreHooks(void) {
     swizzleClassMethod(NSBundle.class, @selector(baseAltStoreAppGroupID), @selector(hook_baseAltStoreAppGroupID));
     // ESC-BEGIN: expose the guest's own bundle to Core Data's migration lookup
     swizzleClassMethod(NSBundle.class, @selector(allBundles), @selector(hook_allBundles));
+    // ESC-END
+
+    // ESC-BEGIN: accept the legacy InstalledApp model when the migration lookup
+    // finds no match, so stores written before upstream 15d8974e stay readable.
+    swizzleClassMethod(NSManagedObjectModel.class,
+                       @selector(mergedModelFromBundles:forStoreMetadata:),
+                       @selector(hook_mergedModelFromBundles:forStoreMetadata:));
     // ESC-END
     
     // replace altStoreSourceURL
