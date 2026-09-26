@@ -502,6 +502,16 @@ static NSString * const ESCLegacyInstalledAppEntity = @"InstalledApp";
 static NSString * const ESCLegacyConstraintName = @"resignedBundleIdentifier";
 static NSString * const ESCOriginalConstraintName = @"bundleIdentifier";
 
+// Original IMPs, captured before the exchange. Both are needed because Core Data
+// asks two different questions on the way to a migration, and both must be able
+// to say "this store is one I can open".
+typedef NSManagedObjectModel *(*ESCMergedModelFn)(id, SEL, NSArray<NSBundle *> *,
+                                                  NSDictionary<NSString *, id> *);
+static ESCMergedModelFn ESCOriginalMergedModel = NULL;
+
+typedef BOOL (*ESCIsConfigurationFn)(id, SEL, NSString *, NSDictionary<NSString *, id> *);
+static ESCIsConfigurationFn ESCOriginalIsConfiguration = NULL;
+
 // Cached: this runs on the migration path, which may be retried.
 static NSMutableDictionary<NSString *, NSManagedObjectModel *> *ESCLegacyModelCache(void) {
     static NSMutableDictionary<NSString *, NSManagedObjectModel *> *cache = nil;
@@ -537,17 +547,63 @@ static NSEntityDescription *ESCEntityWithLegacyConstraint(NSEntityDescription *e
     return entity;
 }
 
-// Load every .mom in the guest's AltStore.momd and return the first one whose
-// InstalledApp entity becomes hash-compatible with `storeMetadata` once its
-// uniqueness constraint is restored.
+// Whether `storeMetadata` describes the same schema as `model`, apart from the
+// InstalledApp uniqueness constraint.
+//
+// Why the comparison skips InstalledApp instead of comparing it:
+//
+// A uniqueness constraint is part of an entity's version hash, which is why
+// upstream 15d8974e changed InstalledApp's hash while leaving the version
+// identifier at 17_6. To match the store we therefore have to match the
+// pre-15d8974e hash, and the obvious way - load a .mom, set
+// entity.uniquenessConstraints back to the old value, then read
+// entityVersionHashesByName - does not work. entityVersionHashesByName is a
+// read-only property (`{ get }`) whose value is established when the model is
+// loaded; mutating an NSEntityDescription afterwards does not recompute it. The
+// returned dictionary keeps reporting the on-disk hash, so an equality test on it
+// can never succeed and the rescue silently degrades into dead code.
+//
+// Reimplementing the hash is not attractive either: the algorithm is private and
+// the encoding is not documented, so a byte-exact reimplementation would be a
+// guess that breaks on any format change.
+//
+// What is both reliable and sufficient: compare every *other* entity. The
+// constraint change touches InstalledApp alone, so a genuine legacy store agrees
+// with the loaded model on all 18 remaining entities, while a store from an
+// unrelated schema does not. Requiring a full match on the other entities keeps
+// the check as strict as the hash comparison it replaces - nothing is accepted
+// on a version string or a guess.
+static BOOL ESCModelMatchesStoreIgnoringInstalledApp(NSManagedObjectModel *model,
+                                                     NSDictionary<NSString *, NSData *> *storeHashes) {
+    NSDictionary<NSString *, NSData *> *modelHashes = model.entityVersionHashesByName;
+    if (![modelHashes isKindOfClass:NSDictionary.class]) return NO;
+    if (modelHashes.count != storeHashes.count) return NO;
+
+    NSUInteger compared = 0;
+    for (NSString *entityName in modelHashes) {
+        if ([entityName isEqualToString:ESCLegacyInstalledAppEntity]) continue;
+        NSData *modelHash = modelHashes[entityName];
+        NSData *storeHash = storeHashes[entityName];
+        if (![modelHash isKindOfClass:NSData.class] || ![storeHash isKindOfClass:NSData.class]) return NO;
+        if (![modelHash isEqualToData:storeHash]) return NO;
+        compared++;
+    }
+
+    // One entity is intentionally skipped, so a real match always compares the
+    // remaining set. A zero here means the model was not what we think it is.
+    return compared > 0;
+}
+
+// Load every .mom in the guest's AltStore.momd and return the first one that
+// describes the same schema as `storeMetadata` once its InstalledApp uniqueness
+// constraint is restored.
 static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadata) {
     if (![storeMetadata isKindOfClass:NSDictionary.class]) return nil;
 
     NSDictionary<NSString *, NSData *> *storeHashes =
         (NSDictionary<NSString *, NSData *> *)storeMetadata[NSStoreModelVersionHashesKey];
     if (![storeHashes isKindOfClass:NSDictionary.class]) return nil;
-    NSData *storeInstalledAppHash = storeHashes[ESCLegacyInstalledAppEntity];
-    if (storeInstalledAppHash.length == 0) return nil;
+    if (storeHashes[ESCLegacyInstalledAppEntity].length == 0) return nil;
 
     // Resolve the guest's momd directly from LiveContainer's own bundle path.
     // This hook runs inside +[NSManagedObjectModel mergedModelFromBundles:
@@ -585,9 +641,13 @@ static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadat
             ESCLegacyModelCache()[key] = legacy;
         }
 
-        NSData *adjusted = legacy.entityVersionHashesByName[ESCLegacyInstalledAppEntity];
-        if (adjusted.length && [adjusted isEqualToData:storeInstalledAppHash]) {
-            NSLog(@"[ESC] legacy model match: %@ (InstalledApp hash %@)", name, ESCDataToHex(adjusted));
+        if (ESCModelMatchesStoreIgnoringInstalledApp(legacy, storeHashes)) {
+            NSLog(@"[ESC] legacy model match: %@ (all %lu other entities agree with the store; "
+                  @"InstalledApp hash left at %@, store has %@)",
+                  name,
+                  (unsigned long)(storeHashes.count - 1),
+                  ESCDataToHex(legacy.entityVersionHashesByName[ESCLegacyInstalledAppEntity]),
+                  ESCDataToHex(storeHashes[ESCLegacyInstalledAppEntity]));
             return legacy;
         }
     }
@@ -646,59 +706,6 @@ static NSManagedObjectModel *ESCLegacyCompatibleModel(NSDictionary *storeMetadat
     return [bundles arrayByAddingObject:guest];
 }
 
-// Signature of +[NSManagedObjectModel mergedModelFromBundles:forStoreMetadata:].
-// Held as an IMP so the hook can reach the original implementation without a
-// compiler-visible declaration of the method.
-typedef NSManagedObjectModel *(*ESCMergedModelFn)(Class,
-                                                  SEL,
-                                                  NSArray<NSBundle *> *,
-                                                  NSDictionary<NSString *, id> *);
-static ESCMergedModelFn ESCOriginalMergedModel = NULL;
-
-// ESC-BEGIN: last-resort rescue for the migration lookup.
-//
-// This is the call PersistentContainer makes when the on-disk store does not
-// match the current model. Its nil return is what becomes Code=-23. When the
-// normal lookup finds nothing, retry against the legacy InstalledApp model
-// (see the block above) so stores written before upstream 15d8974e can still
-// migrate instead of being reported as unreadable.
-//
-// Only a genuine hash match is accepted, so a store from an unrelated schema is
-// still rejected exactly as before.
-+ (NSManagedObjectModel *)hook_mergedModelFromBundles:(NSArray<NSBundle *> *)bundles
-                                     forStoreMetadata:(NSDictionary<NSString *, id> *)metadata {
-    // The exchange-style trick used elsewhere in this file ([NSBundle
-    // hook_allBundles]) needs a compiler-visible declaration of the hooked
-    // method on that class. NSManagedObjectModel has no declaration of
-    // +mergedModelFromBundles:forStoreMetadata: in any header we compile
-    // against, so that form fails with "no known class method for selector".
-    // Call through the captured IMP instead: same message send, no compile-time
-    // signature lookup.
-    if (!ESCOriginalMergedModel) {
-        return nil;
-    }
-    NSManagedObjectModel *merged = ESCOriginalMergedModel(NSManagedObjectModel.class,
-                                                          @selector(mergedModelFromBundles:forStoreMetadata:),
-                                                          bundles,
-                                                          metadata);
-
-    if (merged) {
-        return merged;
-    }
-
-    @try {
-        NSManagedObjectModel *legacy = ESCLegacyCompatibleModel(metadata);
-        if (legacy) {
-            NSLog(@"[ESC] mergedModelFromBundles: returned nil; using legacy InstalledApp model");
-            return legacy;
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[ESC] legacy model lookup threw: %@ (reason: %@)", e.name, e.reason);
-    }
-
-    return nil;
-}
-// ESC-END
 
 @end
 
@@ -797,6 +804,81 @@ static void SSInstallVersionWindow(UIWindowScene *windowScene)
     SSVersionWindows[identifier] = window;
 }
 
+// The Core Data hooks live in their own category because they belong to
+// NSManagedObjectModel, not to NSBundle. They used to sit inside
+// NSBundle(SideStoreHooks): that compiles (an Objective-C category may declare
+// class methods for any class) and the swizzle still worked, because only the
+// IMP is transplanted, but it misleads anyone reading the file about which class
+// is being hooked - and this is precisely the place where getting the owning
+// class wrong produces a silent no-op rather than an error.
+@interface NSManagedObjectModel(SideStoreHooks)
++ (NSManagedObjectModel *)hook_mergedModelFromBundles:(NSArray<NSBundle *> *)bundles
+                                     forStoreMetadata:(NSDictionary<NSString *, id> *)metadata;
+- (BOOL)hook_isConfiguration:(NSString *)name
+  compatibleWithStoreMetadata:(NSDictionary<NSString *, id> *)metadata;
+@end
+
+@implementation NSManagedObjectModel(SideStoreHooks)
+
++ (NSManagedObjectModel *)hook_mergedModelFromBundles:(NSArray<NSBundle *> *)bundles
+                                     forStoreMetadata:(NSDictionary<NSString *, id> *)metadata {
+    // exchange-style swizzle: this call reaches the original implementation
+    NSManagedObjectModel *model = ESCOriginalMergedModel
+        ? ESCOriginalMergedModel(self, _cmd, bundles, metadata)
+        : nil;
+    if (model) return model;
+
+    // Core Data found nothing. This is the moment SideStore would go on to throw
+    // Code=-23. Try the legacy InstalledApp schema before giving up.
+    NSManagedObjectModel *legacy = ESCLegacyCompatibleModel(metadata);
+    if (legacy) {
+        NSLog(@"[ESC] mergedModelFromBundles: rescued a store that matches no shipped model version");
+    }
+    return legacy;
+}
+
+// Core Data's other gate, and the one that actually runs first:
+// PersistentContainer.loadPersistentStores() calls
+//     -[NSManagedObjectModel isConfiguration:compatibleWithStoreMetadata:]
+// and only when it returns NO does the migration path (and therefore
+// mergedModelFromBundles:forStoreMetadata:) come into play. Hooking only the
+// latter leaves this gate free to reject the store before migration is ever
+// attempted, which is why the rescue has to cover both.
+//
+// The same relaxed comparison is used as in the model lookup: every entity other
+// than InstalledApp must match exactly, and InstalledApp is compared by name
+// only, because its uniqueness constraint (and therefore its hash) is the one
+// thing 15d8974e changed.
+- (BOOL)hook_isConfiguration:(NSString *)name
+  compatibleWithStoreMetadata:(NSDictionary<NSString *, id> *)metadata {
+    if (ESCOriginalIsConfiguration && ESCOriginalIsConfiguration(self, _cmd, name, metadata)) {
+        return YES;
+    }
+    if (![metadata isKindOfClass:NSDictionary.class]) return NO;
+
+    @try {
+        NSDictionary<NSString *, NSData *> *storeHashes =
+            (NSDictionary<NSString *, NSData *> *)metadata[NSStoreModelVersionHashesKey];
+        if (![storeHashes isKindOfClass:NSDictionary.class]) return NO;
+        if (storeHashes[ESCLegacyInstalledAppEntity].length == 0) return NO;
+
+        if (!ESCModelMatchesStoreIgnoringInstalledApp(self, storeHashes)) return NO;
+
+        NSLog(@"[ESC] isConfiguration: accepting store with legacy InstalledApp constraint "
+              @"(store %@, model %@, %lu other entities agree)",
+              ESCDataToHex(storeHashes[ESCLegacyInstalledAppEntity]),
+              ESCDataToHex(self.entityVersionHashesByName[ESCLegacyInstalledAppEntity]),
+              (unsigned long)(storeHashes.count - 1));
+        return YES;
+    } @catch (NSException *e) {
+        // Never throw into Core Data: a raised exception here would surface as a
+        // crash during store loading, which is worse than the original -23.
+        NSLog(@"[ESC] isConfiguration hook threw: %@ (reason: %@)", e.name, e.reason);
+        return NO;
+    }
+}
+
+@end
 
 void installSideStoreHooks(void) {
 
@@ -823,6 +905,20 @@ void installSideStoreHooks(void) {
         swizzleClassMethod(NSManagedObjectModel.class,
                            @selector(mergedModelFromBundles:forStoreMetadata:),
                            @selector(hook_mergedModelFromBundles:forStoreMetadata:));
+    }
+
+    // The first gate: PersistentContainer asks this before it ever considers
+    // migration, so a store rejected here never reaches the rescue above.
+    {
+        Method originalIsConfiguration =
+            class_getInstanceMethod(NSManagedObjectModel.class,
+                                    @selector(isConfigurationWithName:compatibleWithStoreMetadata:));
+        if (originalIsConfiguration) {
+            ESCOriginalIsConfiguration = (ESCIsConfigurationFn)method_getImplementation(originalIsConfiguration);
+            swizzle(NSManagedObjectModel.class,
+                    @selector(isConfigurationWithName:compatibleWithStoreMetadata:),
+                    @selector(hook_isConfiguration:compatibleWithStoreMetadata:));
+        }
     }
     // ESC-END
     
